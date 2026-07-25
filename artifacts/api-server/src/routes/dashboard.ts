@@ -3,10 +3,16 @@ import { db, tradesTable, creatorsTable } from "@workspace/db";
 import { eq, count, desc } from "drizzle-orm";
 import { botState } from "../bot/state";
 import { GetDashboardResponse } from "@workspace/api-zod";
+import { getWalletAddress } from "../bot/trader";
 
 const router: IRouter = Router();
 
 router.get("/dashboard", async (_req, res): Promise<void> => {
+  // Lazily populate wallet address from private key if not yet set
+  if (!botState.get().walletAddress) {
+    const addr = getWalletAddress();
+    if (addr) botState.update({ walletAddress: addr });
+  }
   const state = botState.get();
 
   const [totalRow] = await db.select({ total: count() }).from(tradesTable);
