@@ -28,6 +28,8 @@ RUN pnpm --filter @workspace/api-spec run codegen && \
     pnpm --filter @workspace/zora-sniper run build && \
     pnpm --filter @workspace/api-server run build
 
+ENV NODE_ENV=production
+
 EXPOSE 3000
 
 CMD ["node", "--enable-source-maps", "artifacts/api-server/dist/index.mjs"]
