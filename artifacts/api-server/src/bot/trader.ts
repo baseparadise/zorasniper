@@ -167,3 +167,13 @@ export async function getWalletBalance(): Promise<{ address: string; balanceEth:
     return null;
   }
 }
+// Synchronously derive wallet address from private key — no RPC call needed.
+// Safe to call at any time; returns null if WALLET_PRIVATE_KEY is missing or malformed.
+export function getWalletAddress(): string | null {
+  try {
+    const account = privateKeyToAccount(getWalletKey());
+    return account.address;
+  } catch {
+    return null;
+  }
+}
