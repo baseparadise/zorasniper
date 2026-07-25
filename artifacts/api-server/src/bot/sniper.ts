@@ -1,7 +1,7 @@
 import { createPublicClient, webSocket, type Address } from "viem";
 import { base } from "viem/chains";
 import { db, creatorsTable, tradesTable } from "@workspace/db";
-import { eq, and, gte, sql } from "drizzle-orm";
+import { eq, and, gte, ne, sql } from "drizzle-orm";
 import { logger } from "../lib/logger";
 import { botState } from "./state";
 import { broadcast } from "./ws";
@@ -48,7 +48,8 @@ function parseStoredNumber(val: string | null | undefined): number | null {
   return isNaN(n) ? null : n;
 }
 
-/** Count trades for a creator today (UTC midnight → now), excluding failed ones */
+/** Count non-failed trades for a creator today (UTC midnight → now).
+ *  Failed trades are excluded so a bad RPC day doesn't burn the daily quota. */
 async function countTodayBuys(creatorAddr: string): Promise<number> {
   const todayStart = new Date();
   todayStart.setUTCHours(0, 0, 0, 0);
@@ -59,7 +60,8 @@ async function countTodayBuys(creatorAddr: string): Promise<number> {
     .where(
       and(
         eq(tradesTable.creatorAddress, creatorAddr),
-        gte(tradesTable.timestamp, todayStart)
+        gte(tradesTable.timestamp, todayStart),
+        ne(tradesTable.status, "failed")
       )
     );
 

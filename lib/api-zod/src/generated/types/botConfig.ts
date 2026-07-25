@@ -24,4 +24,6 @@ export interface BotConfig {
   takeProfitPercent?: number | null;
   /** @nullable */
   stopLossPercent?: number | null;
+  /** Global max buys per creator wallet per day. null = no limit @nullable */
+  maxBuysPerDay?: number | null;
 }
