@@ -3,12 +3,18 @@ import { db, tradesTable } from "@workspace/db";
 import { count } from "drizzle-orm";
 import { botState } from "../bot/state";
 import { startSniper, stopSniper } from "../bot/sniper";
+import { getWalletAddress } from "../bot/trader";
 import { GetBotStatusResponse, StartBotResponse, StopBotResponse } from "@workspace/api-zod";
 
 const router: IRouter = Router();
 
 function buildStatusResponse() {
   const state = botState.get();
+  // Lazily populate wallet address from private key if bot has not started yet
+  if (!state.walletAddress) {
+    const addr = getWalletAddress();
+    if (addr) botState.update({ walletAddress: addr });
+  }
   return {
     running: state.running,
     walletAddress: state.walletAddress ?? null,
