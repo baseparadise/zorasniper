@@ -2,6 +2,7 @@ import { createServer } from "http";
 import app from "./app";
 import { logger } from "./lib/logger";
 import { startWsServer } from "./bot/ws";
+import { pool } from "@workspace/db";
 
 const rawPort = process.env["PORT"];
 
@@ -17,15 +18,40 @@ if (Number.isNaN(port) || port <= 0) {
   throw new Error(`Invalid PORT value: "${rawPort}"`);
 }
 
+/**
+ * Idempotent schema migration — adds per-wallet settings columns to the
+ * creators table if they do not exist yet.  Safe to run on every boot.
+ */
+async function applyMigrations(): Promise<void> {
+  logger.info("Applying DB migrations…");
+  await pool.query(`
+    ALTER TABLE creators
+      ADD COLUMN IF NOT EXISTS buy_amount_eth     TEXT,
+      ADD COLUMN IF NOT EXISTS slippage_percent   TEXT,
+      ADD COLUMN IF NOT EXISTS max_gas_gwei        TEXT,
+      ADD COLUMN IF NOT EXISTS auto_sell           BOOLEAN,
+      ADD COLUMN IF NOT EXISTS take_profit_percent TEXT,
+      ADD COLUMN IF NOT EXISTS stop_loss_percent   TEXT;
+  `);
+  logger.info("DB migrations applied");
+}
+
 const server = createServer(app);
 
 startWsServer(server);
 
-server.listen(port, () => {
-  logger.info({ port }, "Server listening");
-});
+applyMigrations()
+  .then(() => {
+    server.listen(port, () => {
+      logger.info({ port }, "Server listening");
+    });
 
-server.on("error", (err) => {
-  logger.error({ err }, "Server error");
-  process.exit(1);
-});
+    server.on("error", (err) => {
+      logger.error({ err }, "Server error");
+      process.exit(1);
+    });
+  })
+  .catch((err) => {
+    logger.error({ err }, "Migration failed — aborting startup");
+    process.exit(1);
+  });
