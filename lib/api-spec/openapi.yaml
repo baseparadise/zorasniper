@@ -3,20 +3,29 @@ info:
   # Do not change the title, if the title changes, the import paths will be broken
   title: Api
   version: 0.1.0
-  description: API specification
+  description: Zora Sniper API - Auto trade bot for Zora Coins on Base
 servers:
   - url: /api
     description: Base API path
 tags:
   - name: health
     description: Health operations
+  - name: bot
+    description: Bot control
+  - name: config
+    description: Bot configuration
+  - name: creators
+    description: Creator whitelist
+  - name: trades
+    description: Trade history
+  - name: dashboard
+    description: Dashboard overview
 paths:
   /healthz:
     get:
       operationId: healthCheck
       tags: [health]
       summary: Health check
-      description: Returns server health status
       responses:
         "200":
           description: Healthy
@@ -24,13 +33,425 @@ paths:
             application/json:
               schema:
                 $ref: "#/components/schemas/HealthStatus"
+
+  /bot/status:
+    get:
+      operationId: getBotStatus
+      tags: [bot]
+      summary: Get bot running status and stats
+      responses:
+        "200":
+          description: Bot status
+          content:
+            application/json:
+              schema:
+                $ref: "#/components/schemas/BotStatus"
+
+  /bot/start:
+    post:
+      operationId: startBot
+      tags: [bot]
+      summary: Start the sniper bot
+      responses:
+        "200":
+          description: Bot started
+          content:
+            application/json:
+              schema:
+                $ref: "#/components/schemas/BotStatus"
+
+  /bot/stop:
+    post:
+      operationId: stopBot
+      tags: [bot]
+      summary: Stop the sniper bot
+      responses:
+        "200":
+          description: Bot stopped
+          content:
+            application/json:
+              schema:
+                $ref: "#/components/schemas/BotStatus"
+
+  /config:
+    get:
+      operationId: getConfig
+      tags: [config]
+      summary: Get bot configuration
+      responses:
+        "200":
+          description: Bot configuration
+          content:
+            application/json:
+              schema:
+                $ref: "#/components/schemas/BotConfig"
+    put:
+      operationId: updateConfig
+      tags: [config]
+      summary: Update bot configuration
+      requestBody:
+        required: true
+        content:
+          application/json:
+            schema:
+              $ref: "#/components/schemas/ConfigUpdate"
+      responses:
+        "200":
+          description: Updated config
+          content:
+            application/json:
+              schema:
+                $ref: "#/components/schemas/BotConfig"
+
+  /creators:
+    get:
+      operationId: listCreators
+      tags: [creators]
+      summary: List whitelisted creators
+      responses:
+        "200":
+          description: List of creators
+          content:
+            application/json:
+              schema:
+                type: array
+                items:
+                  $ref: "#/components/schemas/Creator"
+    post:
+      operationId: addCreator
+      tags: [creators]
+      summary: Add creator to whitelist
+      requestBody:
+        required: true
+        content:
+          application/json:
+            schema:
+              $ref: "#/components/schemas/CreatorInput"
+      responses:
+        "201":
+          description: Creator added
+          content:
+            application/json:
+              schema:
+                $ref: "#/components/schemas/Creator"
+        "400":
+          description: Invalid address or already exists
+
+  /creators/{address}:
+    delete:
+      operationId: removeCreator
+      tags: [creators]
+      summary: Remove creator from whitelist
+      parameters:
+        - name: address
+          in: path
+          required: true
+          schema:
+            type: string
+      responses:
+        "204":
+          description: Removed
+        "404":
+          description: Not found
+    patch:
+      operationId: updateCreator
+      tags: [creators]
+      summary: Update creator label or enabled state
+      parameters:
+        - name: address
+          in: path
+          required: true
+          schema:
+            type: string
+      requestBody:
+        required: true
+        content:
+          application/json:
+            schema:
+              $ref: "#/components/schemas/CreatorPatch"
+      responses:
+        "200":
+          description: Updated creator
+          content:
+            application/json:
+              schema:
+                $ref: "#/components/schemas/Creator"
+
+  /trades:
+    get:
+      operationId: listTrades
+      tags: [trades]
+      summary: List trade history
+      parameters:
+        - name: limit
+          in: query
+          schema:
+            type: integer
+            default: 50
+        - name: offset
+          in: query
+          schema:
+            type: integer
+            default: 0
+        - name: status
+          in: query
+          schema:
+            type: string
+            enum: [pending, confirmed, failed, sold]
+      responses:
+        "200":
+          description: Trade list
+          content:
+            application/json:
+              schema:
+                type: array
+                items:
+                  $ref: "#/components/schemas/Trade"
+
+  /trades/stats:
+    get:
+      operationId: getTradeStats
+      tags: [trades]
+      summary: Get trading statistics
+      responses:
+        "200":
+          description: Statistics
+          content:
+            application/json:
+              schema:
+                $ref: "#/components/schemas/TradeStats"
+
+  /dashboard:
+    get:
+      operationId: getDashboard
+      tags: [dashboard]
+      summary: Get dashboard summary
+      responses:
+        "200":
+          description: Dashboard data
+          content:
+            application/json:
+              schema:
+                $ref: "#/components/schemas/DashboardData"
+
 components:
   schemas:
     HealthStatus:
       type: object
+      required: [status]
       properties:
         status:
           type: string
-      required:
-        - status
 
+    BotStatus:
+      type: object
+      required: [running, walletAddress, walletBalanceEth, totalTrades, uptimeSeconds]
+      properties:
+        running:
+          type: boolean
+        walletAddress:
+          type: ["string", "null"]
+        walletBalanceEth:
+          type: ["string", "null"]
+        totalTrades:
+          type: integer
+        snipedToday:
+          type: integer
+        uptimeSeconds:
+          type: integer
+        lastEventAt:
+          type: ["string", "null"]
+        network:
+          type: string
+
+    BotConfig:
+      type: object
+      required:
+        - buyAmountEth
+        - slippagePercent
+        - maxGasGwei
+        - watchMode
+        - enabled
+      properties:
+        buyAmountEth:
+          type: string
+          description: ETH amount per snipe e.g. "0.01"
+        slippagePercent:
+          type: number
+          description: Slippage tolerance in percent
+        maxGasGwei:
+          type: number
+          description: Max gas price in Gwei
+        watchMode:
+          type: string
+          enum: [whitelist, all]
+          description: Whitelist = only listed creators, all = any new coin
+        enabled:
+          type: boolean
+        minLiquidityEth:
+          type: ["number", "null"]
+        autoSell:
+          type: boolean
+        takeProfitPercent:
+          type: ["number", "null"]
+        stopLossPercent:
+          type: ["number", "null"]
+
+    ConfigUpdate:
+      type: object
+      properties:
+        buyAmountEth:
+          type: string
+        slippagePercent:
+          type: number
+        maxGasGwei:
+          type: number
+        watchMode:
+          type: string
+          enum: [whitelist, all]
+        enabled:
+          type: boolean
+        minLiquidityEth:
+          type: ["number", "null"]
+        autoSell:
+          type: boolean
+        takeProfitPercent:
+          type: ["number", "null"]
+        stopLossPercent:
+          type: ["number", "null"]
+
+    Creator:
+      type: object
+      required: [address, label, enabled, addedAt, totalSniped]
+      properties:
+        address:
+          type: string
+        label:
+          type: string
+        enabled:
+          type: boolean
+        addedAt:
+          type: string
+          format: date-time
+        totalSniped:
+          type: integer
+        zoraProfileUrl:
+          type: ["string", "null"]
+
+    CreatorInput:
+      type: object
+      required: [address]
+      properties:
+        address:
+          type: string
+          description: Ethereum address of the creator
+        label:
+          type: string
+          description: Optional display name/label
+
+    CreatorPatch:
+      type: object
+      properties:
+        label:
+          type: string
+        enabled:
+          type: boolean
+
+    Trade:
+      type: object
+      required:
+        - id
+        - tokenAddress
+        - tokenName
+        - tokenSymbol
+        - creatorAddress
+        - buyAmountEth
+        - timestamp
+        - status
+      properties:
+        id:
+          type: integer
+        txHash:
+          type: ["string", "null"]
+        tokenAddress:
+          type: string
+        tokenName:
+          type: string
+        tokenSymbol:
+          type: string
+        creatorAddress:
+          type: string
+        buyAmountEth:
+          type: string
+        tokenAmount:
+          type: ["string", "null"]
+        gasUsedEth:
+          type: ["string", "null"]
+        timestamp:
+          type: string
+          format: date-time
+        status:
+          type: string
+          enum: [pending, confirmed, failed, sold]
+        sellTxHash:
+          type: ["string", "null"]
+        sellAmountEth:
+          type: ["string", "null"]
+        pnlEth:
+          type: ["string", "null"]
+        blockNumber:
+          type: ["integer", "null"]
+
+    TradeStats:
+      type: object
+      required:
+        - totalTrades
+        - successfulTrades
+        - failedTrades
+        - totalEthSpent
+        - totalEthRecovered
+        - totalPnlEth
+        - winCount
+        - lossCount
+      properties:
+        totalTrades:
+          type: integer
+        successfulTrades:
+          type: integer
+        failedTrades:
+          type: integer
+        totalEthSpent:
+          type: string
+        totalEthRecovered:
+          type: string
+        totalPnlEth:
+          type: string
+        winCount:
+          type: integer
+        lossCount:
+          type: integer
+        winRatePercent:
+          type: number
+        avgBuyAmountEth:
+          type: string
+        todayTrades:
+          type: integer
+        todayEthSpent:
+          type: string
+
+    DashboardData:
+      type: object
+      required: [botStatus, recentTrades, stats, topCreators]
+      properties:
+        botStatus:
+          $ref: "#/components/schemas/BotStatus"
+        recentTrades:
+          type: array
+          items:
+            $ref: "#/components/schemas/Trade"
+        stats:
+          $ref: "#/components/schemas/TradeStats"
+        topCreators:
+          type: array
+          items:
+            $ref: "#/components/schemas/Creator"

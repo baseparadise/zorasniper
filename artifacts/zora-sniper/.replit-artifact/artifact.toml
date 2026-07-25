@@ -1,0 +1,27 @@
+kind = "web"
+previewPath = "/"
+title = "Zora Sniper"
+version = "1.0.0"
+id = "artifacts/zora-sniper"
+router = "path"
+
+[[services]]
+name = "web"
+paths = [ "/" ]
+localPort = 21711
+
+[services.development]
+run = "pnpm --filter @workspace/zora-sniper run dev"
+
+[services.production]
+build = [ "pnpm", "--filter", "@workspace/zora-sniper", "run", "build" ]
+serve = "static"
+publicDir = "artifacts/zora-sniper/dist/public"
+
+[[services.production.rewrites]]
+from = "/*"
+to = "/index.html"
+
+[services.env]
+PORT = "21711"
+BASE_PATH = "/"

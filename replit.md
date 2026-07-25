@@ -1,45 +1,53 @@
-# [Project name]
+# Zora Sniper
 
-_Replace the heading above with the project's name, and this line with one sentence describing what this app does for users._
+Automated sniper bot web app for Zora Coins on Base blockchain. The bot listens for new coin launches from whitelisted creators and auto-buys them.
 
 ## Run & Operate
 
-- `pnpm --filter @workspace/api-server run dev` — run the API server (port 5000)
+- `pnpm --filter @workspace/api-server run dev` — run the API server + bot (port 8080)
+- `pnpm --filter @workspace/zora-sniper run dev` — run the frontend dev server
 - `pnpm run typecheck` — full typecheck across all packages
 - `pnpm run build` — typecheck + build all packages
 - `pnpm --filter @workspace/api-spec run codegen` — regenerate API hooks and Zod schemas from the OpenAPI spec
 - `pnpm --filter @workspace/db run push` — push DB schema changes (dev only)
-- Required env: `DATABASE_URL` — Postgres connection string
+- Required env: `DATABASE_URL`, `ALCHEMY_RPC_URL`, `WALLET_PRIVATE_KEY`
 
 ## Stack
 
 - pnpm workspaces, Node.js 24, TypeScript 5.9
-- API: Express 5
+- Frontend: React + Vite + TailwindCSS + React Query
+- API: Express 5 + WebSocket (ws)
+- Blockchain: viem (Base mainnet)
 - DB: PostgreSQL + Drizzle ORM
-- Validation: Zod (`zod/v4`), `drizzle-zod`
+- Validation: Zod (zod/v4), drizzle-zod
 - API codegen: Orval (from OpenAPI spec)
-- Build: esbuild (CJS bundle)
 
 ## Where things live
 
-_Populate as you build — short repo map plus pointers to the source-of-truth file for DB schema, API contracts, theme files, etc._
+- `lib/api-spec/openapi.yaml` — OpenAPI spec (source of truth for all API contracts)
+- `lib/db/src/schema/` — Database schema (creators, trades, botConfig tables)
+- `artifacts/api-server/src/bot/` — Core bot logic (sniper.ts, trader.ts, state.ts, ws.ts)
+- `artifacts/api-server/src/routes/` — API route handlers
+- `artifacts/api-server/src/lib/config.ts` — Bot config loader/saver
+- `artifacts/zora-sniper/src/` — React frontend
 
 ## Architecture decisions
 
-_Populate as you build — non-obvious choices a reader couldn't infer from the code (3-5 bullets)._
-
-## Product
-
-_Describe the high-level user-facing capabilities of this app once they exist._
-
-## User preferences
-
-_Populate as you build — explicit user instructions worth remembering across sessions._
+- Bot state is in-memory (BotStateManager/EventEmitter) — fast, no DB round-trip for status checks
+- WebSocket at `/api/ws` broadcasts real-time events to all connected clients
+- Bot config is stored as key-value rows in DB (flexible, no migration needed for new settings)
+- Railway deployment: Express serves both API + built frontend static files (single service)
+- Zora factory address is configurable via `ZORA_FACTORY_ADDRESS` env var
 
 ## Gotchas
 
-_Populate as you build — sharp edges, "always run X before Y" rules._
+- ALCHEMY_RPC_URL must use `wss://` (WebSocket) for blockchain event listening, not `https://`
+- Always run `pnpm --filter @workspace/api-spec run codegen` after changing `openapi.yaml`
+- The DB schema push (`pnpm --filter @workspace/db run push`) is required before the API server starts
+- For Railway production: Railway auto-provides `DATABASE_URL` when you add a PostgreSQL service
 
-## Pointers
+## User preferences
 
-- See the `pnpm-workspace` skill for workspace structure, TypeScript setup, and package details
+- Deploying to Railway (not Replit Deployments)
+- Starting with Zora protocol; Clanker and PumpFun planned for later
+- GitHub repo: https://github.com/baseparadise/zora-sniper
