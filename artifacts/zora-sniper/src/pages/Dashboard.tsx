@@ -9,11 +9,11 @@ import {
   Trade
 } from "@workspace/api-client-react";
 import { useWebSocket } from "@/hooks/useWebSocket";
-import { formatEth, formatAddress, formatUptime, getBasescanTxLink, cn } from "@/lib/utils";
+import { formatEth, formatAddress, formatUptime, getBasescanTxLink, getBasescanAddressLink, cn } from "@/lib/utils";
 import { Card, CardContent, CardHeader, CardTitle } from "@/components/ui/card";
 import { Button } from "@/components/ui/button";
 import { Badge } from "@/components/ui/badge";
-import { Play, Square, Activity, Wallet, Hash, TrendingUp, TrendingDown, Clock, Crosshair } from "lucide-react";
+import { Play, Square, Activity, Wallet, Hash, TrendingUp, TrendingDown, Clock, Crosshair, ExternalLink, AlertCircle } from "lucide-react";
 import { useToast } from "@/hooks/use-toast";
 
 export default function Dashboard() {
@@ -132,9 +132,23 @@ export default function Dashboard() {
             <div className="text-2xl font-bold font-mono">
               {formatEth(botStatus.walletBalanceEth)} <span className="text-sm text-muted-foreground font-sans">ETH</span>
             </div>
-            <p className="text-xs text-muted-foreground mt-1 font-mono truncate" title={botStatus.walletAddress || ""}>
-              {formatAddress(botStatus.walletAddress)}
-            </p>
+            {botStatus.walletAddress ? (
+              <a
+                href={getBasescanAddressLink(botStatus.walletAddress)}
+                target="_blank"
+                rel="noreferrer"
+                className="flex items-center gap-1 mt-1 text-xs font-mono text-blue-500 hover:text-blue-400 transition-colors group"
+                title={botStatus.walletAddress}
+              >
+                <span>{formatAddress(botStatus.walletAddress)}</span>
+                <ExternalLink className="h-3 w-3 opacity-60 group-hover:opacity-100" />
+              </a>
+            ) : (
+              <p className="flex items-center gap-1 mt-1 text-xs font-mono text-amber-500">
+                <AlertCircle className="h-3 w-3" />
+                KEY NOT SET
+              </p>
+            )}
           </CardContent>
         </Card>
 
