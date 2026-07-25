@@ -156,7 +156,7 @@ paths:
     patch:
       operationId: updateCreator
       tags: [creators]
-      summary: Update creator label or enabled state
+      summary: Update creator label, enabled state, or per-wallet sniper settings
       parameters:
         - name: address
           in: path
@@ -337,6 +337,24 @@ components:
           type: integer
         zoraProfileUrl:
           type: ["string", "null"]
+        buyAmountEth:
+          type: ["string", "null"]
+          description: Per-wallet ETH buy amount. null = use global config
+        slippagePercent:
+          type: ["number", "null"]
+          description: Per-wallet slippage %. null = use global config
+        maxGasGwei:
+          type: ["number", "null"]
+          description: Per-wallet max gas in Gwei. null = use global config
+        autoSell:
+          type: ["boolean", "null"]
+          description: Per-wallet auto-sell toggle. null = use global config
+        takeProfitPercent:
+          type: ["number", "null"]
+          description: Per-wallet take profit %. null = use global config
+        stopLossPercent:
+          type: ["number", "null"]
+          description: Per-wallet stop loss %. null = use global config
 
     CreatorInput:
       type: object
@@ -356,6 +374,24 @@ components:
           type: string
         enabled:
           type: boolean
+        buyAmountEth:
+          type: ["string", "null"]
+          description: Per-wallet ETH buy amount. null resets to global
+        slippagePercent:
+          type: ["number", "null"]
+          description: Per-wallet slippage %. null resets to global
+        maxGasGwei:
+          type: ["number", "null"]
+          description: Per-wallet max gas in Gwei. null resets to global
+        autoSell:
+          type: ["boolean", "null"]
+          description: Per-wallet auto-sell. null resets to global
+        takeProfitPercent:
+          type: ["number", "null"]
+          description: Per-wallet take profit %. null resets to global
+        stopLossPercent:
+          type: ["number", "null"]
+          description: Per-wallet stop loss %. null resets to global
 
     Trade:
       type: object

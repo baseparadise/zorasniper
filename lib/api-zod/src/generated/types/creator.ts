@@ -14,4 +14,16 @@ export interface Creator {
   totalSniped: number;
   /** @nullable */
   zoraProfileUrl?: string | null;
+  /** Per-wallet override. null = use global config @nullable */
+  buyAmountEth?: string | null;
+  /** @nullable */
+  slippagePercent?: number | null;
+  /** @nullable */
+  maxGasGwei?: number | null;
+  /** @nullable */
+  autoSell?: boolean | null;
+  /** @nullable */
+  takeProfitPercent?: number | null;
+  /** @nullable */
+  stopLossPercent?: number | null;
 }

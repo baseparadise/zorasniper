@@ -9,6 +9,13 @@ export const creatorsTable = pgTable("creators", {
   addedAt: timestamp("added_at", { withTimezone: true }).notNull().defaultNow(),
   totalSniped: integer("total_sniped").notNull().default(0),
   zoraProfileUrl: text("zora_profile_url"),
+  // Per-wallet sniper settings — null means "use global config"
+  buyAmountEth: text("buy_amount_eth"),
+  slippagePercent: text("slippage_percent"),
+  maxGasGwei: text("max_gas_gwei"),
+  autoSell: boolean("auto_sell"),
+  takeProfitPercent: text("take_profit_percent"),
+  stopLossPercent: text("stop_loss_percent"),
 });
 
 export const insertCreatorSchema = createInsertSchema(creatorsTable).omit({

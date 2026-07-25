@@ -42,6 +42,13 @@ function getWsRpcUrl(): string {
   return url.replace("https://", "wss://").replace("http://", "ws://");
 }
 
+/** Parse a stored text column into a number, returning null if empty/invalid */
+function parseStoredNumber(val: string | null | undefined): number | null {
+  if (!val || val === "") return null;
+  const n = parseFloat(val);
+  return isNaN(n) ? null : n;
+}
+
 export async function startSniper(): Promise<void> {
   if (botState.get().running) {
     logger.warn("Sniper already running");
@@ -89,17 +96,19 @@ export async function startSniper(): Promise<void> {
           if (!config.enabled) continue;
 
           let shouldSnipe = false;
+          let creatorRow: typeof creatorsTable.$inferSelect | null = null;
 
           if (config.watchMode === "all") {
             shouldSnipe = true;
           } else {
-            // Whitelist mode
-            const [creator] = await db
+            // Whitelist mode — look up creator for both eligibility and per-wallet settings
+            const [found] = await db
               .select()
               .from(creatorsTable)
               .where(eq(creatorsTable.address, creatorAddr))
               .limit(1);
-            shouldSnipe = !!creator?.enabled;
+            creatorRow = found ?? null;
+            shouldSnipe = !!creatorRow?.enabled;
           }
 
           if (!shouldSnipe) {
@@ -107,7 +116,25 @@ export async function startSniper(): Promise<void> {
             continue;
           }
 
-          logger.info({ coin, name, creator: creatorAddr }, "Sniping coin");
+          // Resolve effective settings: per-wallet overrides take priority, global config is fallback
+          const effectiveBuyAmount = creatorRow?.buyAmountEth ?? config.buyAmountEth;
+          const effectiveSlippage =
+            parseStoredNumber(creatorRow?.slippagePercent) ?? config.slippagePercent;
+          const effectiveMaxGas =
+            parseStoredNumber(creatorRow?.maxGasGwei) ?? config.maxGasGwei;
+
+          logger.info(
+            {
+              coin,
+              name,
+              creator: creatorAddr,
+              buyAmountEth: effectiveBuyAmount,
+              slippagePercent: effectiveSlippage,
+              maxGasGwei: effectiveMaxGas,
+              settingsSource: creatorRow?.buyAmountEth ? "per-wallet" : "global",
+            },
+            "Sniping coin"
+          );
 
           // Fire-and-forget: don't await so we keep listening
           executeBuy({
@@ -115,9 +142,9 @@ export async function startSniper(): Promise<void> {
             tokenName: name,
             tokenSymbol: symbol,
             creatorAddress: creatorAddr,
-            buyAmountEth: config.buyAmountEth,
-            slippagePercent: config.slippagePercent,
-            maxGasGwei: config.maxGasGwei,
+            buyAmountEth: effectiveBuyAmount,
+            slippagePercent: effectiveSlippage,
+            maxGasGwei: effectiveMaxGas,
           }).catch((err) => logger.error({ err }, "executeBuy error"));
         }
       },

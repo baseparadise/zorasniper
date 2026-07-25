@@ -88,9 +88,43 @@ router.patch("/creators/:address", async (req, res): Promise<void> => {
   }
 
   const address = params.data.address.toLowerCase();
+  const body = bodyParsed.data;
+
+  // Build the update object, converting numeric overrides to text for storage
+  // (the DB stores per-wallet numbers as TEXT, consistent with the global bot_config table)
+  const updateData: Partial<typeof creatorsTable.$inferInsert> = {};
+
+  if (body.label !== undefined) updateData.label = body.label;
+  if (body.enabled !== undefined) updateData.enabled = body.enabled;
+
+  // Per-wallet sniper settings: present in body (including explicit null) → update
+  if ("buyAmountEth" in body) updateData.buyAmountEth = body.buyAmountEth ?? null;
+  if ("slippagePercent" in body) {
+    updateData.slippagePercent =
+      body.slippagePercent != null ? String(body.slippagePercent) : null;
+  }
+  if ("maxGasGwei" in body) {
+    updateData.maxGasGwei =
+      body.maxGasGwei != null ? String(body.maxGasGwei) : null;
+  }
+  if ("autoSell" in body) updateData.autoSell = body.autoSell ?? null;
+  if ("takeProfitPercent" in body) {
+    updateData.takeProfitPercent =
+      body.takeProfitPercent != null ? String(body.takeProfitPercent) : null;
+  }
+  if ("stopLossPercent" in body) {
+    updateData.stopLossPercent =
+      body.stopLossPercent != null ? String(body.stopLossPercent) : null;
+  }
+
+  if (Object.keys(updateData).length === 0) {
+    res.status(400).json({ error: "No fields to update" });
+    return;
+  }
+
   const [updated] = await db
     .update(creatorsTable)
-    .set(bodyParsed.data)
+    .set(updateData)
     .where(eq(creatorsTable.address, address))
     .returning();
 

@@ -84,6 +84,18 @@ export interface Creator {
   totalSniped: number;
   /** @nullable */
   zoraProfileUrl?: string | null;
+  /** Per-wallet override — null means use global config @nullable */
+  buyAmountEth?: string | null;
+  /** @nullable */
+  slippagePercent?: number | null;
+  /** @nullable */
+  maxGasGwei?: number | null;
+  /** @nullable */
+  autoSell?: boolean | null;
+  /** @nullable */
+  takeProfitPercent?: number | null;
+  /** @nullable */
+  stopLossPercent?: number | null;
 }
 
 export interface CreatorInput {
@@ -96,17 +108,19 @@ export interface CreatorInput {
 export interface CreatorPatch {
   label?: string;
   enabled?: boolean;
+  /** Per-wallet override — null resets to global @nullable */
+  buyAmountEth?: string | null;
+  /** @nullable */
+  slippagePercent?: number | null;
+  /** @nullable */
+  maxGasGwei?: number | null;
+  /** @nullable */
+  autoSell?: boolean | null;
+  /** @nullable */
+  takeProfitPercent?: number | null;
+  /** @nullable */
+  stopLossPercent?: number | null;
 }
-
-export type TradeStatus = typeof TradeStatus[keyof typeof TradeStatus];
-
-
-export const TradeStatus = {
-  pending: 'pending',
-  confirmed: 'confirmed',
-  failed: 'failed',
-  sold: 'sold',
-} as const;
 
 export interface Trade {
   id: number;
@@ -133,6 +147,32 @@ export interface Trade {
   blockNumber?: number | null;
 }
 
+export type TradeStatus = typeof TradeStatus[keyof typeof TradeStatus];
+
+
+export const TradeStatus = {
+  pending: 'pending',
+  confirmed: 'confirmed',
+  failed: 'failed',
+  sold: 'sold',
+} as const;
+
+export type ListTradesParams = {
+  limit?: number;
+  offset?: number;
+  status?: ListTradesStatus;
+}
+
+export type ListTradesStatus = typeof ListTradesStatus[keyof typeof ListTradesStatus];
+
+
+export const ListTradesStatus = {
+  pending: 'pending',
+  confirmed: 'confirmed',
+  failed: 'failed',
+  sold: 'sold',
+} as const;
+
 export interface TradeStats {
   totalTrades: number;
   successfulTrades: number;
@@ -154,20 +194,3 @@ export interface DashboardData {
   stats: TradeStats;
   topCreators: Creator[];
 }
-
-export type ListTradesParams = {
-limit?: number;
-offset?: number;
-status?: ListTradesStatus;
-};
-
-export type ListTradesStatus = typeof ListTradesStatus[keyof typeof ListTradesStatus];
-
-
-export const ListTradesStatus = {
-  pending: 'pending',
-  confirmed: 'confirmed',
-  failed: 'failed',
-  sold: 'sold',
-} as const;
-

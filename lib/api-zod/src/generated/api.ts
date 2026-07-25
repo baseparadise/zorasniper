@@ -104,18 +104,28 @@ export const UpdateConfigResponse = zod.object({
   "stopLossPercent": zod.number().nullish()
 })
 
-
-/**
- * @summary List whitelisted creators
- */
-export const ListCreatorsResponseItem = zod.object({
+// Shared creator shape used in list, add, and update responses.
+// slippagePercent / maxGasGwei / takeProfitPercent / stopLossPercent are stored
+// as TEXT in the DB, so we use coerce.number() to transparently convert on parse.
+const creatorShape = {
   "address": zod.string(),
   "label": zod.string(),
   "enabled": zod.boolean(),
   "addedAt": zod.coerce.date(),
   "totalSniped": zod.number(),
-  "zoraProfileUrl": zod.string().nullish()
-})
+  "zoraProfileUrl": zod.string().nullish(),
+  "buyAmountEth": zod.string().nullish(),
+  "slippagePercent": zod.coerce.number().nullish(),
+  "maxGasGwei": zod.coerce.number().nullish(),
+  "autoSell": zod.boolean().nullish(),
+  "takeProfitPercent": zod.coerce.number().nullish(),
+  "stopLossPercent": zod.coerce.number().nullish(),
+} as const;
+
+/**
+ * @summary List whitelisted creators
+ */
+export const ListCreatorsResponseItem = zod.object(creatorShape)
 export const ListCreatorsResponse = zod.array(ListCreatorsResponseItem)
 
 
@@ -127,14 +137,7 @@ export const AddCreatorBody = zod.object({
   "label": zod.string().optional().describe('Optional display name\/label')
 })
 
-export const AddCreatorResponse = zod.object({
-  "address": zod.string(),
-  "label": zod.string(),
-  "enabled": zod.boolean(),
-  "addedAt": zod.coerce.date(),
-  "totalSniped": zod.number(),
-  "zoraProfileUrl": zod.string().nullish()
-})
+export const AddCreatorResponse = zod.object(creatorShape)
 
 
 /**
@@ -156,17 +159,17 @@ export const UpdateCreatorParams = zod.object({
 
 export const UpdateCreatorBody = zod.object({
   "label": zod.string().optional(),
-  "enabled": zod.boolean().optional()
+  "enabled": zod.boolean().optional(),
+  // Per-wallet sniper overrides — null resets to global
+  "buyAmountEth": zod.string().nullish(),
+  "slippagePercent": zod.number().nullish(),
+  "maxGasGwei": zod.number().nullish(),
+  "autoSell": zod.boolean().nullish(),
+  "takeProfitPercent": zod.number().nullish(),
+  "stopLossPercent": zod.number().nullish(),
 })
 
-export const UpdateCreatorResponse = zod.object({
-  "address": zod.string(),
-  "label": zod.string(),
-  "enabled": zod.boolean(),
-  "addedAt": zod.coerce.date(),
-  "totalSniped": zod.number(),
-  "zoraProfileUrl": zod.string().nullish()
-})
+export const UpdateCreatorResponse = zod.object(creatorShape)
 
 
 /**
@@ -265,14 +268,5 @@ export const GetDashboardResponse = zod.object({
   "todayTrades": zod.number().optional(),
   "todayEthSpent": zod.string().optional()
 }),
-  "topCreators": zod.array(zod.object({
-  "address": zod.string(),
-  "label": zod.string(),
-  "enabled": zod.boolean(),
-  "addedAt": zod.coerce.date(),
-  "totalSniped": zod.number(),
-  "zoraProfileUrl": zod.string().nullish()
-}))
+  "topCreators": zod.array(zod.object(creatorShape))
 })
-
-

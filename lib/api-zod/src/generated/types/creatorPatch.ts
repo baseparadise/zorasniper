@@ -9,4 +9,16 @@
 export interface CreatorPatch {
   label?: string;
   enabled?: boolean;
+  /** Per-wallet override. null = reset to global @nullable */
+  buyAmountEth?: string | null;
+  /** @nullable */
+  slippagePercent?: number | null;
+  /** @nullable */
+  maxGasGwei?: number | null;
+  /** @nullable */
+  autoSell?: boolean | null;
+  /** @nullable */
+  takeProfitPercent?: number | null;
+  /** @nullable */
+  stopLossPercent?: number | null;
 }
