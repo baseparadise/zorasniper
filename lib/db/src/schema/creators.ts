@@ -16,6 +16,7 @@ export const creatorsTable = pgTable("creators", {
   autoSell: boolean("auto_sell"),
   takeProfitPercent: text("take_profit_percent"),
   stopLossPercent: text("stop_loss_percent"),
+  maxBuysPerDay: integer("max_buys_per_day"), // null = use global setting
 });
 
 export const insertCreatorSchema = createInsertSchema(creatorsTable).omit({

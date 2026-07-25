@@ -73,7 +73,8 @@ export const GetConfigResponse = zod.object({
   "minLiquidityEth": zod.number().nullish(),
   "autoSell": zod.boolean().optional(),
   "takeProfitPercent": zod.number().nullish(),
-  "stopLossPercent": zod.number().nullish()
+  "stopLossPercent": zod.number().nullish(),
+  "maxBuysPerDay": zod.number().int().nullish(),
 })
 
 
@@ -89,7 +90,8 @@ export const UpdateConfigBody = zod.object({
   "minLiquidityEth": zod.number().nullish(),
   "autoSell": zod.boolean().optional(),
   "takeProfitPercent": zod.number().nullish(),
-  "stopLossPercent": zod.number().nullish()
+  "stopLossPercent": zod.number().nullish(),
+  "maxBuysPerDay": zod.number().int().nullish(),
 })
 
 export const UpdateConfigResponse = zod.object({
@@ -101,12 +103,13 @@ export const UpdateConfigResponse = zod.object({
   "minLiquidityEth": zod.number().nullish(),
   "autoSell": zod.boolean().optional(),
   "takeProfitPercent": zod.number().nullish(),
-  "stopLossPercent": zod.number().nullish()
+  "stopLossPercent": zod.number().nullish(),
+  "maxBuysPerDay": zod.number().int().nullish(),
 })
 
 // Shared creator shape used in list, add, and update responses.
 // slippagePercent / maxGasGwei / takeProfitPercent / stopLossPercent are stored
-// as TEXT in the DB, so we use coerce.number() to transparently convert on parse.
+// as TEXT in the DB; maxBuysPerDay is stored as INTEGER (no coerce needed).
 const creatorShape = {
   "address": zod.string(),
   "label": zod.string(),
@@ -120,6 +123,7 @@ const creatorShape = {
   "autoSell": zod.boolean().nullish(),
   "takeProfitPercent": zod.coerce.number().nullish(),
   "stopLossPercent": zod.coerce.number().nullish(),
+  "maxBuysPerDay": zod.number().int().nullish(),
 } as const;
 
 /**
@@ -151,7 +155,7 @@ export const RemoveCreatorResponse = zod.void()
 
 
 /**
- * @summary Update creator label or enabled state
+ * @summary Update creator label, enabled state, or per-wallet sniper settings
  */
 export const UpdateCreatorParams = zod.object({
   "address": zod.coerce.string()
@@ -160,13 +164,13 @@ export const UpdateCreatorParams = zod.object({
 export const UpdateCreatorBody = zod.object({
   "label": zod.string().optional(),
   "enabled": zod.boolean().optional(),
-  // Per-wallet sniper overrides — null resets to global
   "buyAmountEth": zod.string().nullish(),
   "slippagePercent": zod.number().nullish(),
   "maxGasGwei": zod.number().nullish(),
   "autoSell": zod.boolean().nullish(),
   "takeProfitPercent": zod.number().nullish(),
   "stopLossPercent": zod.number().nullish(),
+  "maxBuysPerDay": zod.number().int().nullish(),
 })
 
 export const UpdateCreatorResponse = zod.object(creatorShape)
@@ -228,45 +232,45 @@ export const GetTradeStatsResponse = zod.object({
  */
 export const GetDashboardResponse = zod.object({
   "botStatus": zod.object({
-  "running": zod.boolean(),
-  "walletAddress": zod.string().nullable(),
-  "walletBalanceEth": zod.string().nullable(),
-  "totalTrades": zod.number(),
-  "snipedToday": zod.number().optional(),
-  "uptimeSeconds": zod.number(),
-  "lastEventAt": zod.string().nullish(),
-  "network": zod.string().optional()
-}),
+    "running": zod.boolean(),
+    "walletAddress": zod.string().nullable(),
+    "walletBalanceEth": zod.string().nullable(),
+    "totalTrades": zod.number(),
+    "snipedToday": zod.number().optional(),
+    "uptimeSeconds": zod.number(),
+    "lastEventAt": zod.string().nullish(),
+    "network": zod.string().optional()
+  }),
   "recentTrades": zod.array(zod.object({
-  "id": zod.number(),
-  "txHash": zod.string().nullish(),
-  "tokenAddress": zod.string(),
-  "tokenName": zod.string(),
-  "tokenSymbol": zod.string(),
-  "creatorAddress": zod.string(),
-  "buyAmountEth": zod.string(),
-  "tokenAmount": zod.string().nullish(),
-  "gasUsedEth": zod.string().nullish(),
-  "timestamp": zod.coerce.date(),
-  "status": zod.enum(['pending', 'confirmed', 'failed', 'sold']),
-  "sellTxHash": zod.string().nullish(),
-  "sellAmountEth": zod.string().nullish(),
-  "pnlEth": zod.string().nullish(),
-  "blockNumber": zod.number().nullish()
-})),
+    "id": zod.number(),
+    "txHash": zod.string().nullish(),
+    "tokenAddress": zod.string(),
+    "tokenName": zod.string(),
+    "tokenSymbol": zod.string(),
+    "creatorAddress": zod.string(),
+    "buyAmountEth": zod.string(),
+    "tokenAmount": zod.string().nullish(),
+    "gasUsedEth": zod.string().nullish(),
+    "timestamp": zod.coerce.date(),
+    "status": zod.enum(['pending', 'confirmed', 'failed', 'sold']),
+    "sellTxHash": zod.string().nullish(),
+    "sellAmountEth": zod.string().nullish(),
+    "pnlEth": zod.string().nullish(),
+    "blockNumber": zod.number().nullish()
+  })),
   "stats": zod.object({
-  "totalTrades": zod.number(),
-  "successfulTrades": zod.number(),
-  "failedTrades": zod.number(),
-  "totalEthSpent": zod.string(),
-  "totalEthRecovered": zod.string(),
-  "totalPnlEth": zod.string(),
-  "winCount": zod.number(),
-  "lossCount": zod.number(),
-  "winRatePercent": zod.number().optional(),
-  "avgBuyAmountEth": zod.string().optional(),
-  "todayTrades": zod.number().optional(),
-  "todayEthSpent": zod.string().optional()
-}),
+    "totalTrades": zod.number(),
+    "successfulTrades": zod.number(),
+    "failedTrades": zod.number(),
+    "totalEthSpent": zod.string(),
+    "totalEthRecovered": zod.string(),
+    "totalPnlEth": zod.string(),
+    "winCount": zod.number(),
+    "lossCount": zod.number(),
+    "winRatePercent": zod.number().optional(),
+    "avgBuyAmountEth": zod.string().optional(),
+    "todayTrades": zod.number().optional(),
+    "todayEthSpent": zod.string().optional()
+  }),
   "topCreators": zod.array(zod.object(creatorShape))
 })

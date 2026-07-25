@@ -26,4 +26,6 @@ export interface Creator {
   takeProfitPercent?: number | null;
   /** @nullable */
   stopLossPercent?: number | null;
+  /** Per-wallet max buys per day. null = use global @nullable */
+  maxBuysPerDay?: number | null;
 }

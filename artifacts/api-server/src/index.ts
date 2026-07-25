@@ -19,19 +19,19 @@ if (Number.isNaN(port) || port <= 0) {
 }
 
 /**
- * Idempotent schema migration — adds per-wallet settings columns to the
- * creators table if they do not exist yet.  Safe to run on every boot.
+ * Idempotent schema migrations — run on every boot, safe to re-apply.
  */
 async function applyMigrations(): Promise<void> {
   logger.info("Applying DB migrations…");
   await pool.query(`
     ALTER TABLE creators
-      ADD COLUMN IF NOT EXISTS buy_amount_eth     TEXT,
-      ADD COLUMN IF NOT EXISTS slippage_percent   TEXT,
-      ADD COLUMN IF NOT EXISTS max_gas_gwei        TEXT,
-      ADD COLUMN IF NOT EXISTS auto_sell           BOOLEAN,
-      ADD COLUMN IF NOT EXISTS take_profit_percent TEXT,
-      ADD COLUMN IF NOT EXISTS stop_loss_percent   TEXT;
+      ADD COLUMN IF NOT EXISTS buy_amount_eth      TEXT,
+      ADD COLUMN IF NOT EXISTS slippage_percent    TEXT,
+      ADD COLUMN IF NOT EXISTS max_gas_gwei         TEXT,
+      ADD COLUMN IF NOT EXISTS auto_sell            BOOLEAN,
+      ADD COLUMN IF NOT EXISTS take_profit_percent  TEXT,
+      ADD COLUMN IF NOT EXISTS stop_loss_percent    TEXT,
+      ADD COLUMN IF NOT EXISTS max_buys_per_day     INTEGER;
   `);
   logger.info("DB migrations applied");
 }

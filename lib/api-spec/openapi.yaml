@@ -296,6 +296,9 @@ components:
           type: ["number", "null"]
         stopLossPercent:
           type: ["number", "null"]
+        maxBuysPerDay:
+          type: ["integer", "null"]
+          description: Global max buys per creator wallet per day. null = no limit
 
     ConfigUpdate:
       type: object
@@ -319,6 +322,9 @@ components:
           type: ["number", "null"]
         stopLossPercent:
           type: ["number", "null"]
+        maxBuysPerDay:
+          type: ["integer", "null"]
+          description: Global max buys per creator wallet per day. null = no limit
 
     Creator:
       type: object
@@ -355,6 +361,9 @@ components:
         stopLossPercent:
           type: ["number", "null"]
           description: Per-wallet stop loss %. null = use global config
+        maxBuysPerDay:
+          type: ["integer", "null"]
+          description: Per-wallet max buys per day. null = use global setting
 
     CreatorInput:
       type: object
@@ -392,6 +401,9 @@ components:
         stopLossPercent:
           type: ["number", "null"]
           description: Per-wallet stop loss %. null resets to global
+        maxBuysPerDay:
+          type: ["integer", "null"]
+          description: Per-wallet max buys per day. null resets to global
 
     Trade:
       type: object

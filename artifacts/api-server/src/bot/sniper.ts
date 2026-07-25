@@ -1,7 +1,7 @@
 import { createPublicClient, webSocket, type Address } from "viem";
 import { base } from "viem/chains";
-import { db, creatorsTable } from "@workspace/db";
-import { eq } from "drizzle-orm";
+import { db, creatorsTable, tradesTable } from "@workspace/db";
+import { eq, and, gte, sql } from "drizzle-orm";
 import { logger } from "../lib/logger";
 import { botState } from "./state";
 import { broadcast } from "./ws";
@@ -38,7 +38,6 @@ let balanceInterval: ReturnType<typeof setInterval> | null = null;
 
 function getWsRpcUrl(): string {
   const url = process.env.ALCHEMY_RPC_URL ?? "";
-  // Convert HTTPS to WSS for WebSocket transport
   return url.replace("https://", "wss://").replace("http://", "ws://");
 }
 
@@ -49,6 +48,24 @@ function parseStoredNumber(val: string | null | undefined): number | null {
   return isNaN(n) ? null : n;
 }
 
+/** Count trades for a creator today (UTC midnight → now), excluding failed ones */
+async function countTodayBuys(creatorAddr: string): Promise<number> {
+  const todayStart = new Date();
+  todayStart.setUTCHours(0, 0, 0, 0);
+
+  const [{ count }] = await db
+    .select({ count: sql<number>`count(*)::int` })
+    .from(tradesTable)
+    .where(
+      and(
+        eq(tradesTable.creatorAddress, creatorAddr),
+        gte(tradesTable.timestamp, todayStart)
+      )
+    );
+
+  return count ?? 0;
+}
+
 export async function startSniper(): Promise<void> {
   if (botState.get().running) {
     logger.warn("Sniper already running");
@@ -57,7 +74,6 @@ export async function startSniper(): Promise<void> {
 
   logger.info({ factory: ZORA_FACTORY_ADDRESS }, "Starting Zora sniper");
 
-  // Update wallet info
   const wallet = await getWalletBalance();
   botState.update({
     running: true,
@@ -101,7 +117,7 @@ export async function startSniper(): Promise<void> {
           if (config.watchMode === "all") {
             shouldSnipe = true;
           } else {
-            // Whitelist mode — look up creator for both eligibility and per-wallet settings
+            // Whitelist mode — look up creator for eligibility and per-wallet settings
             const [found] = await db
               .select()
               .from(creatorsTable)
@@ -116,12 +132,33 @@ export async function startSniper(): Promise<void> {
             continue;
           }
 
-          // Resolve effective settings: per-wallet overrides take priority, global config is fallback
+          // Resolve effective settings: per-wallet overrides → global fallback
           const effectiveBuyAmount = creatorRow?.buyAmountEth ?? config.buyAmountEth;
           const effectiveSlippage =
             parseStoredNumber(creatorRow?.slippagePercent) ?? config.slippagePercent;
           const effectiveMaxGas =
             parseStoredNumber(creatorRow?.maxGasGwei) ?? config.maxGasGwei;
+          const effectiveMaxBuysPerDay =
+            creatorRow?.maxBuysPerDay ?? config.maxBuysPerDay;
+
+          // ── Daily buy limit check ─────────────────────────────────────────
+          if (effectiveMaxBuysPerDay != null && effectiveMaxBuysPerDay > 0) {
+            const todayCount = await countTodayBuys(creatorAddr);
+            if (todayCount >= effectiveMaxBuysPerDay) {
+              logger.info(
+                { creatorAddr, todayCount, limit: effectiveMaxBuysPerDay },
+                "Daily buy limit reached for this wallet — skipping"
+              );
+              broadcast("event", {
+                type: "limit_reached",
+                creator: creatorAddr,
+                todayCount,
+                limit: effectiveMaxBuysPerDay,
+              });
+              continue;
+            }
+          }
+          // ─────────────────────────────────────────────────────────────────
 
           logger.info(
             {
@@ -131,6 +168,7 @@ export async function startSniper(): Promise<void> {
               buyAmountEth: effectiveBuyAmount,
               slippagePercent: effectiveSlippage,
               maxGasGwei: effectiveMaxGas,
+              maxBuysPerDay: effectiveMaxBuysPerDay ?? "unlimited",
               settingsSource: creatorRow?.buyAmountEth ? "per-wallet" : "global",
             },
             "Sniping coin"

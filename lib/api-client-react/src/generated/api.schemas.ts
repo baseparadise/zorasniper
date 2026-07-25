@@ -28,7 +28,6 @@ export interface BotStatus {
  */
 export type BotConfigWatchMode = typeof BotConfigWatchMode[keyof typeof BotConfigWatchMode];
 
-
 export const BotConfigWatchMode = {
   whitelist: 'whitelist',
   all: 'all',
@@ -51,10 +50,11 @@ export interface BotConfig {
   takeProfitPercent?: number | null;
   /** @nullable */
   stopLossPercent?: number | null;
+  /** Global max buys per creator wallet per day. null = no limit @nullable */
+  maxBuysPerDay?: number | null;
 }
 
 export type ConfigUpdateWatchMode = typeof ConfigUpdateWatchMode[keyof typeof ConfigUpdateWatchMode];
-
 
 export const ConfigUpdateWatchMode = {
   whitelist: 'whitelist',
@@ -74,6 +74,8 @@ export interface ConfigUpdate {
   takeProfitPercent?: number | null;
   /** @nullable */
   stopLossPercent?: number | null;
+  /** Global max buys per creator wallet per day. null = no limit @nullable */
+  maxBuysPerDay?: number | null;
 }
 
 export interface Creator {
@@ -96,6 +98,8 @@ export interface Creator {
   takeProfitPercent?: number | null;
   /** @nullable */
   stopLossPercent?: number | null;
+  /** Per-wallet max buys per day. null = use global @nullable */
+  maxBuysPerDay?: number | null;
 }
 
 export interface CreatorInput {
@@ -120,6 +124,8 @@ export interface CreatorPatch {
   takeProfitPercent?: number | null;
   /** @nullable */
   stopLossPercent?: number | null;
+  /** Per-wallet max buys per day. null resets to global @nullable */
+  maxBuysPerDay?: number | null;
 }
 
 export interface Trade {
@@ -149,7 +155,6 @@ export interface Trade {
 
 export type TradeStatus = typeof TradeStatus[keyof typeof TradeStatus];
 
-
 export const TradeStatus = {
   pending: 'pending',
   confirmed: 'confirmed',
@@ -164,7 +169,6 @@ export type ListTradesParams = {
 }
 
 export type ListTradesStatus = typeof ListTradesStatus[keyof typeof ListTradesStatus];
-
 
 export const ListTradesStatus = {
   pending: 'pending',

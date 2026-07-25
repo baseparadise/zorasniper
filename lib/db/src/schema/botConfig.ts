@@ -18,4 +18,5 @@ export const DEFAULT_CONFIG = {
   autoSell: "false",
   takeProfitPercent: "",
   stopLossPercent: "",
+  maxBuysPerDay: "", // empty = no limit
 } as const;

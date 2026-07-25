@@ -8,7 +8,7 @@ import {
   useUpdateConfig,
   getGetConfigQueryKey 
 } from "@workspace/api-client-react";
-import { Card, CardContent, CardHeader, CardTitle, CardDescription } from "@/components/ui/card";
+import { Card, CardContent, CardHeader, CardTitle } from "@/components/ui/card";
 import { Button } from "@/components/ui/button";
 import { Input } from "@/components/ui/input";
 import { Switch } from "@/components/ui/switch";
@@ -27,6 +27,7 @@ const configSchema = z.object({
   autoSell: z.boolean().default(false),
   takeProfitPercent: z.coerce.number().nullable().optional(),
   stopLossPercent: z.coerce.number().nullable().optional(),
+  maxBuysPerDay: z.coerce.number().int().positive().nullable().optional(),
 });
 
 type ConfigFormValues = z.infer<typeof configSchema>;
@@ -49,6 +50,7 @@ export default function Settings() {
       autoSell: false,
       takeProfitPercent: null,
       stopLossPercent: null,
+      maxBuysPerDay: null,
     }
   });
 
@@ -64,6 +66,7 @@ export default function Settings() {
         autoSell: config.autoSell ?? false,
         takeProfitPercent: config.takeProfitPercent,
         stopLossPercent: config.stopLossPercent,
+        maxBuysPerDay: config.maxBuysPerDay ?? null,
       });
     }
   }, [config, form]);
@@ -166,6 +169,34 @@ export default function Settings() {
                       </SelectContent>
                     </Select>
                     <FormDescription>Restrict to specific creators or watch all.</FormDescription>
+                    <FormMessage />
+                  </FormItem>
+                )}
+              />
+
+              <FormField
+                control={form.control}
+                name="maxBuysPerDay"
+                render={({ field }) => (
+                  <FormItem>
+                    <FormLabel>Max Buys Per Wallet Per Day</FormLabel>
+                    <FormControl>
+                      <Input
+                        type="number"
+                        min="1"
+                        step="1"
+                        placeholder="No limit"
+                        value={field.value ?? ""}
+                        onChange={(e) =>
+                          field.onChange(e.target.value ? parseInt(e.target.value, 10) : null)
+                        }
+                        className="font-mono bg-background"
+                      />
+                    </FormControl>
+                    <FormDescription>
+                      Stop buying a wallet's tokens once this many buys are recorded today.
+                      Empty = unlimited.
+                    </FormDescription>
                     <FormMessage />
                   </FormItem>
                 )}

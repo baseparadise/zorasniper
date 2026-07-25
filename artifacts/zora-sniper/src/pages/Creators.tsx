@@ -8,7 +8,7 @@ import {
   getListCreatorsQueryKey 
 } from "@workspace/api-client-react";
 import type { Creator } from "@workspace/api-client-react";
-import { Card, CardContent, CardHeader, CardTitle, CardDescription } from "@/components/ui/card";
+import { Card, CardContent, CardHeader, CardTitle } from "@/components/ui/card";
 import { Input } from "@/components/ui/input";
 import { Button } from "@/components/ui/button";
 import { Table, TableBody, TableCell, TableHead, TableHeader, TableRow } from "@/components/ui/table";
@@ -40,6 +40,9 @@ function WalletSettingsSheet({ creator, onClose }: WalletSettingsSheetProps) {
   const [maxGas, setMaxGas] = useState<string>(
     creator?.maxGasGwei != null ? String(creator.maxGasGwei) : ""
   );
+  const [maxBuysPerDay, setMaxBuysPerDay] = useState<string>(
+    creator?.maxBuysPerDay != null ? String(creator.maxBuysPerDay) : ""
+  );
   const [autoSellMode, setAutoSellMode] = useState<"global" | "on" | "off">(
     creator?.autoSell === true ? "on" : creator?.autoSell === false ? "off" : "global"
   );
@@ -63,6 +66,7 @@ function WalletSettingsSheet({ creator, onClose }: WalletSettingsSheetProps) {
           buyAmountEth: buyAmount.trim() !== "" ? buyAmount.trim() : null,
           slippagePercent: slippage.trim() !== "" ? parseFloat(slippage) : null,
           maxGasGwei: maxGas.trim() !== "" ? parseFloat(maxGas) : null,
+          maxBuysPerDay: maxBuysPerDay.trim() !== "" ? parseInt(maxBuysPerDay, 10) : null,
           autoSell: autoSellValue,
           takeProfitPercent:
             autoSellMode === "on" && takeProfit.trim() !== ""
@@ -97,6 +101,7 @@ function WalletSettingsSheet({ creator, onClose }: WalletSettingsSheetProps) {
     setBuyAmount("");
     setSlippage("");
     setMaxGas("");
+    setMaxBuysPerDay("");
     setAutoSellMode("global");
     setTakeProfit("");
     setStopLoss("");
@@ -123,9 +128,7 @@ function WalletSettingsSheet({ creator, onClose }: WalletSettingsSheetProps) {
       <div className="space-y-6">
         {/* Execution overrides */}
         <div>
-          <p className="text-sm font-semibold mb-3 flex items-center gap-1.5">
-            Execution Overrides
-          </p>
+          <p className="text-sm font-semibold mb-3">Execution Overrides</p>
           <div className="space-y-4">
             <div className="space-y-1.5">
               <label className="text-sm font-medium">Buy Amount (ETH)</label>
@@ -163,6 +166,22 @@ function WalletSettingsSheet({ creator, onClose }: WalletSettingsSheetProps) {
                 onChange={(e) => setMaxGas(e.target.value)}
                 className="font-mono bg-background"
               />
+            </div>
+
+            <div className="space-y-1.5">
+              <label className="text-sm font-medium">Max Buys Per Day</label>
+              <Input
+                type="number"
+                min="1"
+                step="1"
+                placeholder="e.g. 3  (empty = global)"
+                value={maxBuysPerDay}
+                onChange={(e) => setMaxBuysPerDay(e.target.value)}
+                className="font-mono bg-background"
+              />
+              <p className="text-xs text-muted-foreground">
+                Stop sniping this wallet once this many buys are recorded today.
+              </p>
             </div>
           </div>
         </div>
@@ -308,7 +327,8 @@ export default function Creators() {
     c.buyAmountEth != null ||
     c.slippagePercent != null ||
     c.maxGasGwei != null ||
-    c.autoSell != null;
+    c.autoSell != null ||
+    c.maxBuysPerDay != null;
 
   return (
     <div className="p-8 space-y-8 max-w-5xl mx-auto">
@@ -361,6 +381,7 @@ export default function Creators() {
                 <TableHead>Target</TableHead>
                 <TableHead>Address</TableHead>
                 <TableHead className="text-right">Snipes</TableHead>
+                <TableHead className="text-center">Daily Limit</TableHead>
                 <TableHead className="text-center">Status</TableHead>
                 <TableHead className="text-right">Actions</TableHead>
               </TableRow>
@@ -368,11 +389,11 @@ export default function Creators() {
             <TableBody>
               {isLoading ? (
                 <TableRow>
-                  <TableCell colSpan={5} className="text-center h-24 text-muted-foreground">Loading targets...</TableCell>
+                  <TableCell colSpan={6} className="text-center h-24 text-muted-foreground">Loading targets...</TableCell>
                 </TableRow>
               ) : creators.length === 0 ? (
                 <TableRow>
-                  <TableCell colSpan={5} className="text-center h-32 text-muted-foreground">
+                  <TableCell colSpan={6} className="text-center h-32 text-muted-foreground">
                     No creators in watchlist. Add one above.
                   </TableCell>
                 </TableRow>
@@ -398,6 +419,15 @@ export default function Creators() {
                       </div>
                     </TableCell>
                     <TableCell className="text-right font-mono">{c.totalSniped}</TableCell>
+                    <TableCell className="text-center">
+                      {c.maxBuysPerDay != null ? (
+                        <Badge variant="outline" className="font-mono text-xs">
+                          {c.maxBuysPerDay}/day
+                        </Badge>
+                      ) : (
+                        <span className="text-xs text-muted-foreground">global</span>
+                      )}
+                    </TableCell>
                     <TableCell className="text-center">
                       <div className="flex items-center justify-center gap-2">
                         <Switch 

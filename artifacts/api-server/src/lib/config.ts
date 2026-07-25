@@ -11,11 +11,18 @@ export interface AppConfig {
   autoSell: boolean;
   takeProfitPercent: number | null;
   stopLossPercent: number | null;
+  maxBuysPerDay: number | null; // null = no limit
 }
 
 function parseNullableNumber(val: string | undefined): number | null {
   if (!val || val === "") return null;
   const n = parseFloat(val);
+  return isNaN(n) ? null : n;
+}
+
+function parseNullableInt(val: string | undefined): number | null {
+  if (!val || val === "") return null;
+  const n = parseInt(val, 10);
   return isNaN(n) ? null : n;
 }
 
@@ -36,6 +43,7 @@ export async function loadConfig(): Promise<AppConfig> {
     autoSell: (map.autoSell ?? DEFAULT_CONFIG.autoSell) === "true",
     takeProfitPercent: parseNullableNumber(map.takeProfitPercent),
     stopLossPercent: parseNullableNumber(map.stopLossPercent),
+    maxBuysPerDay: parseNullableInt(map.maxBuysPerDay),
   };
 }
 

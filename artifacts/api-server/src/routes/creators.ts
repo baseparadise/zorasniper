@@ -90,14 +90,12 @@ router.patch("/creators/:address", async (req, res): Promise<void> => {
   const address = params.data.address.toLowerCase();
   const body = bodyParsed.data;
 
-  // Build the update object, converting numeric overrides to text for storage
-  // (the DB stores per-wallet numbers as TEXT, consistent with the global bot_config table)
+  // Build update object — numeric overrides stored as TEXT, integers stored as INTEGER
   const updateData: Partial<typeof creatorsTable.$inferInsert> = {};
 
   if (body.label !== undefined) updateData.label = body.label;
   if (body.enabled !== undefined) updateData.enabled = body.enabled;
 
-  // Per-wallet sniper settings: present in body (including explicit null) → update
   if ("buyAmountEth" in body) updateData.buyAmountEth = body.buyAmountEth ?? null;
   if ("slippagePercent" in body) {
     updateData.slippagePercent =
@@ -116,6 +114,7 @@ router.patch("/creators/:address", async (req, res): Promise<void> => {
     updateData.stopLossPercent =
       body.stopLossPercent != null ? String(body.stopLossPercent) : null;
   }
+  if ("maxBuysPerDay" in body) updateData.maxBuysPerDay = body.maxBuysPerDay ?? null;
 
   if (Object.keys(updateData).length === 0) {
     res.status(400).json({ error: "No fields to update" });
