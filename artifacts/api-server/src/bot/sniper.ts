@@ -8,12 +8,18 @@ import { broadcast } from "./ws";
 import { executeBuy, getWalletBalance } from "./trader";
 import { loadConfig } from "../lib/config";
 
-// Zora Coins factory on Base mainnet
-// Configure via env ZORA_FACTORY_ADDRESS to override
+// Zora Coins factory on Base mainnet — emits CoinCreated, CoinCreatedV4,
+// CreatorCoinCreated, and TrendCoinCreated.
+// Configure via env ZORA_FACTORY_ADDRESS to override.
 const ZORA_FACTORY_ADDRESS =
   (process.env.ZORA_FACTORY_ADDRESS as Address | undefined) ??
-  "0x777777751622c0d3258f214f9df38e35bf45baf3";
+  "0x777777751622c0d3258f214F9DF38E35BF45baF3";
 
+// Full ABI covering all four coin-creation events emitted by the factory.
+// • CoinCreated        — V3 coins  (old, still emitted)
+// • CoinCreatedV4      — V4 coins  (replaces pool address with poolKey tuple)
+// • CreatorCoinCreated — Creator-linked coins (same shape as CoinCreatedV4)
+// • TrendCoinCreated   — Trend coins (only caller indexed; no payoutRecipient/name)
 const ZORA_COIN_FACTORY_ABI = [
   {
     type: "event",
@@ -31,10 +37,103 @@ const ZORA_COIN_FACTORY_ABI = [
       { name: "marketType", type: "uint8", indexed: false },
     ],
   },
+  {
+    type: "event",
+    name: "CoinCreatedV4",
+    inputs: [
+      { name: "caller", type: "address", indexed: true },
+      { name: "payoutRecipient", type: "address", indexed: true },
+      { name: "platformReferrer", type: "address", indexed: true },
+      { name: "currency", type: "address", indexed: false },
+      { name: "uri", type: "string", indexed: false },
+      { name: "name", type: "string", indexed: false },
+      { name: "symbol", type: "string", indexed: false },
+      { name: "coin", type: "address", indexed: false },
+      {
+        name: "poolKey",
+        type: "tuple",
+        indexed: false,
+        components: [
+          { name: "currency0", type: "address" },
+          { name: "currency1", type: "address" },
+          { name: "fee", type: "uint24" },
+          { name: "tickSpacing", type: "int24" },
+          { name: "hooks", type: "address" },
+        ],
+      },
+      { name: "poolKeyHash", type: "bytes32", indexed: false },
+      { name: "version", type: "string", indexed: false },
+    ],
+  },
+  {
+    type: "event",
+    name: "CreatorCoinCreated",
+    inputs: [
+      { name: "caller", type: "address", indexed: true },
+      { name: "payoutRecipient", type: "address", indexed: true },
+      { name: "platformReferrer", type: "address", indexed: true },
+      { name: "currency", type: "address", indexed: false },
+      { name: "uri", type: "string", indexed: false },
+      { name: "name", type: "string", indexed: false },
+      { name: "symbol", type: "string", indexed: false },
+      { name: "coin", type: "address", indexed: false },
+      {
+        name: "poolKey",
+        type: "tuple",
+        indexed: false,
+        components: [
+          { name: "currency0", type: "address" },
+          { name: "currency1", type: "address" },
+          { name: "fee", type: "uint24" },
+          { name: "tickSpacing", type: "int24" },
+          { name: "hooks", type: "address" },
+        ],
+      },
+      { name: "poolKeyHash", type: "bytes32", indexed: false },
+      { name: "version", type: "string", indexed: false },
+    ],
+  },
+  {
+    type: "event",
+    name: "TrendCoinCreated",
+    // NOTE: TrendCoinCreated has NO payoutRecipient/platformReferrer indexed fields
+    // and NO name field — only caller, symbol, coin, poolKey, poolKeyHash, poolConfig, version.
+    inputs: [
+      { name: "caller", type: "address", indexed: true },
+      { name: "symbol", type: "string", indexed: false },
+      { name: "coin", type: "address", indexed: false },
+      {
+        name: "poolKey",
+        type: "tuple",
+        indexed: false,
+        components: [
+          { name: "currency0", type: "address" },
+          { name: "currency1", type: "address" },
+          { name: "fee", type: "uint24" },
+          { name: "tickSpacing", type: "int24" },
+          { name: "hooks", type: "address" },
+        ],
+      },
+      { name: "poolKeyHash", type: "bytes32", indexed: false },
+      { name: "poolConfig", type: "bytes", indexed: false },
+      { name: "version", type: "string", indexed: false },
+    ],
+  },
 ] as const;
+
+const COIN_EVENT_NAMES = [
+  "CoinCreated",
+  "CoinCreatedV4",
+  "CreatorCoinCreated",
+  "TrendCoinCreated",
+] as const;
+
+type CoinEventName = (typeof COIN_EVENT_NAMES)[number];
 
 let unwatch: (() => void) | null = null;
 let balanceInterval: ReturnType<typeof setInterval> | null = null;
+let reconnectTimeout: ReturnType<typeof setTimeout> | null = null;
+let reconnectAttempts = 0;
 
 function getWsRpcUrl(): string {
   const url = process.env.ALCHEMY_RPC_URL ?? "";
@@ -96,6 +195,200 @@ async function recordSkipped(
   }
 }
 
+/** Core handler invoked for every coin-creation event from any event type. */
+async function handleCoinCreated(params: {
+  eventName: CoinEventName;
+  caller: Address;
+  payoutRecipient?: Address;
+  coin: Address;
+  name: string;
+  symbol: string;
+}): Promise<void> {
+  const { eventName, caller, payoutRecipient, coin, name, symbol } = params;
+
+  const creatorAddr = (payoutRecipient ?? caller).toLowerCase();
+
+  logger.info(
+    { coin, name, symbol, creator: creatorAddr, eventName },
+    "New Zora coin detected"
+  );
+  botState.update({ lastEventAt: new Date().toISOString() });
+  broadcast("event", { type: "coin_created", coin, name, symbol, creator: creatorAddr, eventName });
+
+  const config = await loadConfig();
+
+  // Bot is globally disabled — record detection but skip buy
+  if (!config.enabled) {
+    logger.info({ creatorAddr }, "Bot is disabled, skipping buy");
+    await recordSkipped(coin, name, symbol, creatorAddr, "Bot is disabled");
+    return;
+  }
+
+  let shouldSnipe = false;
+  let creatorRow: typeof creatorsTable.$inferSelect | null = null;
+
+  if (config.watchMode === "all") {
+    shouldSnipe = true;
+  } else {
+    // Whitelist mode — look up creator for eligibility and per-wallet settings
+    const [found] = await db
+      .select()
+      .from(creatorsTable)
+      .where(eq(creatorsTable.address, creatorAddr))
+      .limit(1);
+    creatorRow = found ?? null;
+    shouldSnipe = !!creatorRow?.enabled;
+  }
+
+  if (!shouldSnipe) {
+    logger.debug({ creatorAddr }, "Creator not in whitelist, skipping");
+    await recordSkipped(coin, name, symbol, creatorAddr, "Creator not in whitelist");
+    return;
+  }
+
+  // Resolve effective settings: per-wallet overrides → global fallback
+  const effectiveBuyAmount = creatorRow?.buyAmountEth ?? config.buyAmountEth;
+  const effectiveSlippage =
+    parseStoredNumber(creatorRow?.slippagePercent) ?? config.slippagePercent;
+  const effectiveMaxGas =
+    parseStoredNumber(creatorRow?.maxGasGwei) ?? config.maxGasGwei;
+  const effectiveMaxBuysPerDay =
+    creatorRow?.maxBuysPerDay ?? config.maxBuysPerDay;
+
+  // ── Minimum liquidity check (config.minLiquidityEth) ─────────────────────
+  // This is a deployment-time filter — the coin was just created so on-chain
+  // liquidity is whatever the creator seeded.  We skip this check at creation
+  // time because the pool hasn't been initialised yet; minLiquidityEth is
+  // reserved for post-deployment sell guards and is noted here for clarity.
+  // ─────────────────────────────────────────────────────────────────────────
+
+  // ── Daily buy limit check ─────────────────────────────────────────────────
+  if (effectiveMaxBuysPerDay != null && effectiveMaxBuysPerDay > 0) {
+    const todayCount = await countTodayBuys(creatorAddr);
+    if (todayCount >= effectiveMaxBuysPerDay) {
+      const reason = `Daily buy limit reached (${todayCount}/${effectiveMaxBuysPerDay} today)`;
+      logger.info(
+        { creatorAddr, todayCount, limit: effectiveMaxBuysPerDay },
+        "Daily buy limit reached for this wallet — skipping"
+      );
+      await recordSkipped(coin, name, symbol, creatorAddr, reason);
+      broadcast("event", {
+        type: "limit_reached",
+        creator: creatorAddr,
+        todayCount,
+        limit: effectiveMaxBuysPerDay,
+      });
+      return;
+    }
+  }
+  // ─────────────────────────────────────────────────────────────────────────
+
+  logger.info(
+    { creatorAddr, coin, effectiveBuyAmount },
+    "Creator matched — executing snipe"
+  );
+
+  // Fire-and-forget: don't await so we keep listening
+  executeBuy({
+    tokenAddress: coin,
+    tokenName: name,
+    tokenSymbol: symbol,
+    creatorAddress: creatorAddr,
+    buyAmountEth: effectiveBuyAmount,
+    slippagePercent: effectiveSlippage,
+    maxGasGwei: effectiveMaxGas,
+  }).catch((err) => logger.error({ err }, "executeBuy error"));
+}
+
+/** Attach the WebSocket event listener for all coin-creation events. */
+function attachListener(): void {
+  if (unwatch) {
+    unwatch();
+    unwatch = null;
+  }
+
+  const wsUrl = getWsRpcUrl();
+
+  const client = createPublicClient({
+    chain: base,
+    transport: webSocket(wsUrl),
+  });
+
+  // Watch ALL events emitted by the factory — no eventName filter so we catch
+  // CoinCreated, CoinCreatedV4, CreatorCoinCreated, and TrendCoinCreated.
+  unwatch = client.watchContractEvent({
+    address: ZORA_FACTORY_ADDRESS,
+    abi: ZORA_COIN_FACTORY_ABI,
+    onLogs: async (logs) => {
+      // Reset reconnect counter on successful events
+      reconnectAttempts = 0;
+
+      for (const log of logs) {
+        const eventName = log.eventName as CoinEventName;
+        if (!(COIN_EVENT_NAMES as readonly string[]).includes(eventName)) continue;
+
+        // eslint-disable-next-line @typescript-eslint/no-explicit-any
+        const args = log.args as any;
+
+        const caller: Address | undefined = args.caller;
+        const coin: Address | undefined = args.coin;
+        const symbol: string | undefined = args.symbol;
+
+        if (!coin || !symbol || !caller) continue;
+
+        // TrendCoinCreated has no `name` field — synthesise one from symbol
+        const name: string = args.name ?? `[Trend] ${symbol}`;
+
+        // TrendCoinCreated has no `payoutRecipient` — fall back to caller
+        const payoutRecipient: Address | undefined = args.payoutRecipient;
+
+        await handleCoinCreated({
+          eventName,
+          caller,
+          payoutRecipient,
+          coin,
+          name,
+          symbol,
+        });
+      }
+    },
+    onError: (err) => {
+      logger.error({ err }, "WatchContractEvent error — will reconnect");
+      broadcast("error", { message: "Event listener error, reconnecting…" });
+      scheduleReconnect();
+    },
+  });
+
+  logger.info(
+    { factory: ZORA_FACTORY_ADDRESS, events: COIN_EVENT_NAMES },
+    "Sniper listening for all coin-creation events"
+  );
+}
+
+/** Schedule a reconnect with exponential back-off (max 60 s). */
+function scheduleReconnect(): void {
+  if (reconnectTimeout) return; // already pending
+
+  if (!botState.get().running) return; // bot was stopped manually
+
+  const delay = Math.min(5_000 * Math.pow(2, reconnectAttempts), 60_000);
+  reconnectAttempts++;
+
+  logger.info({ delay, attempt: reconnectAttempts }, "Scheduling sniper reconnect");
+
+  reconnectTimeout = setTimeout(() => {
+    reconnectTimeout = null;
+    if (!botState.get().running) return;
+
+    try {
+      attachListener();
+    } catch (err) {
+      logger.error({ err }, "Reconnect failed");
+      scheduleReconnect();
+    }
+  }, delay);
+}
+
 export async function startSniper(): Promise<void> {
   if (botState.get().running) {
     logger.warn("Sniper already running");
@@ -115,119 +408,8 @@ export async function startSniper(): Promise<void> {
 
   broadcast("status", botState.get());
 
-  const wsUrl = getWsRpcUrl();
-
-  try {
-    const client = createPublicClient({
-      chain: base,
-      transport: webSocket(wsUrl),
-    });
-
-    unwatch = client.watchContractEvent({
-      address: ZORA_FACTORY_ADDRESS,
-      abi: ZORA_COIN_FACTORY_ABI,
-      eventName: "CoinCreated",
-      onLogs: async (logs) => {
-        for (const log of logs) {
-          const { caller, payoutRecipient, name, symbol, coin } = log.args;
-          if (!coin || !name || !symbol || !caller) continue;
-
-          const creatorAddr = (payoutRecipient ?? caller).toLowerCase();
-
-          logger.info({ coin, name, symbol, creator: creatorAddr }, "New Zora coin detected");
-          botState.update({ lastEventAt: new Date().toISOString() });
-          broadcast("event", { type: "coin_created", coin, name, symbol, creator: creatorAddr });
-
-          const config = await loadConfig();
-
-          // Bot is globally disabled — record detection but skip buy
-          if (!config.enabled) {
-            logger.info({ creatorAddr }, "Bot is disabled, skipping buy");
-            await recordSkipped(coin as Address, name, symbol, creatorAddr, "Bot is disabled");
-            continue;
-          }
-
-          let shouldSnipe = false;
-          let creatorRow: typeof creatorsTable.$inferSelect | null = null;
-
-          if (config.watchMode === "all") {
-            shouldSnipe = true;
-          } else {
-            // Whitelist mode — look up creator for eligibility and per-wallet settings
-            const [found] = await db
-              .select()
-              .from(creatorsTable)
-              .where(eq(creatorsTable.address, creatorAddr))
-              .limit(1);
-            creatorRow = found ?? null;
-            shouldSnipe = !!creatorRow?.enabled;
-          }
-
-          if (!shouldSnipe) {
-            logger.debug({ creatorAddr }, "Creator not in whitelist, skipping");
-            await recordSkipped(coin as Address, name, symbol, creatorAddr, "Creator not in whitelist");
-            continue;
-          }
-
-          // Resolve effective settings: per-wallet overrides → global fallback
-          const effectiveBuyAmount = creatorRow?.buyAmountEth ?? config.buyAmountEth;
-          const effectiveSlippage =
-            parseStoredNumber(creatorRow?.slippagePercent) ?? config.slippagePercent;
-          const effectiveMaxGas =
-            parseStoredNumber(creatorRow?.maxGasGwei) ?? config.maxGasGwei;
-          const effectiveMaxBuysPerDay =
-            creatorRow?.maxBuysPerDay ?? config.maxBuysPerDay;
-
-          // ── Daily buy limit check ─────────────────────────────────────────
-          if (effectiveMaxBuysPerDay != null && effectiveMaxBuysPerDay > 0) {
-            const todayCount = await countTodayBuys(creatorAddr);
-            if (todayCount >= effectiveMaxBuysPerDay) {
-              const reason = `Daily buy limit reached (${todayCount}/${effectiveMaxBuysPerDay} today)`;
-              logger.info(
-                { creatorAddr, todayCount, limit: effectiveMaxBuysPerDay },
-                "Daily buy limit reached for this wallet — skipping"
-              );
-              await recordSkipped(coin as Address, name, symbol, creatorAddr, reason);
-              broadcast("event", {
-                type: "limit_reached",
-                creator: creatorAddr,
-                todayCount,
-                limit: effectiveMaxBuysPerDay,
-              });
-              continue;
-            }
-          }
-          // ─────────────────────────────────────────────────────────────────
-
-          logger.info(
-            { creatorAddr, coin, effectiveBuyAmount },
-            "Creator matched — executing snipe"
-          );
-
-          // Fire-and-forget: don't await so we keep listening
-          executeBuy({
-            tokenAddress: coin as Address,
-            tokenName: name,
-            tokenSymbol: symbol,
-            creatorAddress: creatorAddr,
-            buyAmountEth: effectiveBuyAmount,
-            slippagePercent: effectiveSlippage,
-            maxGasGwei: effectiveMaxGas,
-          }).catch((err) => logger.error({ err }, "executeBuy error"));
-        }
-      },
-      onError: (err) => {
-        logger.error({ err }, "WatchContractEvent error");
-        broadcast("error", { message: "Event listener error" });
-      },
-    });
-
-    logger.info("Sniper listening for CoinCreated events");
-  } catch (err) {
-    logger.error({ err }, "Failed to start sniper");
-    botState.update({ running: false, startedAt: null });
-    throw err;
-  }
+  reconnectAttempts = 0;
+  attachListener();
 
   // Refresh wallet balance every 30s
   balanceInterval = setInterval(async () => {
@@ -240,6 +422,10 @@ export async function startSniper(): Promise<void> {
 }
 
 export function stopSniper(): void {
+  if (reconnectTimeout) {
+    clearTimeout(reconnectTimeout);
+    reconnectTimeout = null;
+  }
   if (unwatch) {
     unwatch();
     unwatch = null;

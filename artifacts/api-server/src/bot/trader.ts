@@ -14,6 +14,7 @@ import { logger } from "../lib/logger";
 import { botState } from "./state";
 import { broadcast } from "./ws";
 
+// Minimal ABI to call buy() on a deployed Zora coin contract.
 const ZORA_COIN_ABI = [
   {
     type: "function",
@@ -61,7 +62,6 @@ export async function executeBuy(params: TradeParams): Promise<void> {
     tokenSymbol,
     creatorAddress,
     buyAmountEth,
-    slippagePercent: _slippagePercent,
     maxGasGwei,
   } = params;
 
@@ -87,15 +87,24 @@ export async function executeBuy(params: TradeParams): Promise<void> {
     const walletClient = createWalletClient({ account, chain: base, transport: http(getRpcUrl()) });
 
     const value = parseEther(buyAmountEth);
-    const minOrderSize = 0n; // accept any amount
+    const minOrderSize = 0n; // accept any fill
 
-    // Convert gwei → wei: multiply by 1e9
-    const maxFeePerGas = BigInt(Math.round(maxGasGwei * 1e9));
-    const gasPrice = await publicClient.getGasPrice();
-    const effectiveGasPrice = gasPrice > maxFeePerGas ? maxFeePerGas : gasPrice;
+    // EIP-1559 gas: cap maxFeePerGas at the user-configured limit.
+    // Use estimateFeesPerGas() so we also get maxPriorityFeePerGas correctly.
+    const maxFeeCapWei = BigInt(Math.round(maxGasGwei * 1e9));
+    const feeEstimate = await publicClient.estimateFeesPerGas();
+    const maxFeePerGas =
+      feeEstimate.maxFeePerGas < maxFeeCapWei
+        ? feeEstimate.maxFeePerGas
+        : maxFeeCapWei;
+    // Priority fee: use the network estimate but don't exceed the overall cap.
+    const maxPriorityFeePerGas =
+      feeEstimate.maxPriorityFeePerGas < maxFeePerGas
+        ? feeEstimate.maxPriorityFeePerGas
+        : maxFeePerGas;
 
     const txHash = await walletClient.writeContract({
-      address: tokenAddress as Address,
+      address: tokenAddress,
       abi: ZORA_COIN_ABI,
       functionName: "buy",
       args: [
@@ -108,14 +117,20 @@ export async function executeBuy(params: TradeParams): Promise<void> {
         0n,
       ],
       value,
-      maxFeePerGas: effectiveGasPrice,
+      maxFeePerGas,
+      maxPriorityFeePerGas,
     });
 
     logger.info({ txHash, tokenAddress }, "Buy tx submitted");
 
-    const receipt = await publicClient.waitForTransactionReceipt({ hash: txHash, timeout: 60_000 });
+    const receipt = await publicClient.waitForTransactionReceipt({
+      hash: txHash,
+      timeout: 60_000,
+    });
 
-    const gasUsedEth = formatEther(receipt.gasUsed * (receipt.effectiveGasPrice ?? effectiveGasPrice));
+    const gasUsedEth = formatEther(
+      receipt.gasUsed * (receipt.effectiveGasPrice ?? maxFeePerGas)
+    );
     const isConfirmed = receipt.status === "success";
 
     const [updated] = await db
@@ -130,20 +145,23 @@ export async function executeBuy(params: TradeParams): Promise<void> {
       .where(eq(tradesTable.id, tradeRow.id))
       .returning();
 
-    // Only increment creator snipe count on confirmed buys
+    // Increment creator snipe count and bot counters only on confirmed buys.
     if (isConfirmed) {
       await db
         .update(creatorsTable)
         .set({ totalSniped: sql`${creatorsTable.totalSniped} + 1` })
         .where(eq(creatorsTable.address, creatorAddress.toLowerCase()));
-    }
 
-    const state = botState.get();
-    botState.update({
-      totalTrades: state.totalTrades + 1,
-      snipedToday: state.snipedToday + 1,
-      lastEventAt: new Date().toISOString(),
-    });
+      const state = botState.get();
+      botState.update({
+        totalTrades: state.totalTrades + 1,
+        snipedToday: state.snipedToday + 1,
+        lastEventAt: new Date().toISOString(),
+      });
+    } else {
+      // Failed on-chain — update lastEventAt but don't increment snipedToday.
+      botState.update({ lastEventAt: new Date().toISOString() });
+    }
 
     broadcast("trade", updated);
     logger.info({ txHash, status: updated.status, tokenName }, "Buy settled");
@@ -155,10 +173,9 @@ export async function executeBuy(params: TradeParams): Promise<void> {
       .set({ status: "failed", failReason })
       .where(eq(tradesTable.id, tradeRow.id))
       .returning();
-    botState.update({
-      snipedToday: botState.get().snipedToday + 1,
-      lastEventAt: new Date().toISOString(),
-    });
+
+    // Exception (pre-submission failure) — don't increment snipedToday.
+    botState.update({ lastEventAt: new Date().toISOString() });
     broadcast("trade", updated);
   }
 }
