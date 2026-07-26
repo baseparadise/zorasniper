@@ -185,7 +185,7 @@ export const listTradesQueryOffsetDefault = 0;
 export const ListTradesQueryParams = zod.object({
   "limit": zod.coerce.number().default(listTradesQueryLimitDefault),
   "offset": zod.coerce.number().default(listTradesQueryOffsetDefault),
-  "status": zod.enum(['pending', 'confirmed', 'failed', 'sold']).optional()
+  "status": zod.enum(['pending', 'confirmed', 'failed', 'sold', 'skipped']).optional()
 })
 
 export const ListTradesResponseItem = zod.object({
@@ -199,11 +199,12 @@ export const ListTradesResponseItem = zod.object({
   "tokenAmount": zod.string().nullish(),
   "gasUsedEth": zod.string().nullish(),
   "timestamp": zod.coerce.date(),
-  "status": zod.enum(['pending', 'confirmed', 'failed', 'sold']),
+  "status": zod.enum(['pending', 'confirmed', 'failed', 'sold', 'skipped']),
   "sellTxHash": zod.string().nullish(),
   "sellAmountEth": zod.string().nullish(),
   "pnlEth": zod.string().nullish(),
-  "blockNumber": zod.number().nullish()
+  "blockNumber": zod.number().nullish(),
+    "failReason": zod.string().nullish()
 })
 export const ListTradesResponse = zod.array(ListTradesResponseItem)
 
@@ -252,11 +253,12 @@ export const GetDashboardResponse = zod.object({
     "tokenAmount": zod.string().nullish(),
     "gasUsedEth": zod.string().nullish(),
     "timestamp": zod.coerce.date(),
-    "status": zod.enum(['pending', 'confirmed', 'failed', 'sold']),
+    "status": zod.enum(['pending', 'confirmed', 'failed', 'sold', 'skipped']),
     "sellTxHash": zod.string().nullish(),
     "sellAmountEth": zod.string().nullish(),
     "pnlEth": zod.string().nullish(),
-    "blockNumber": zod.number().nullish()
+    "blockNumber": zod.number().nullish(),
+    "failReason": zod.string().nullish()
   })),
   "stats": zod.object({
     "totalTrades": zod.number(),
@@ -274,3 +276,4 @@ export const GetDashboardResponse = zod.object({
   }),
   "topCreators": zod.array(zod.object(creatorShape))
 })
+
