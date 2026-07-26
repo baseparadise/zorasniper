@@ -87,9 +87,9 @@ export async function executeBuy(params: TradeParams): Promise<void> {
     const walletClient = createWalletClient({ account, chain: base, transport: http(getRpcUrl()) });
 
     const value = parseEther(buyAmountEth);
-    const minOrderSize = 0n; // accept any amount; slippage protection via maxFeePerGas
+    const minOrderSize = 0n; // accept any amount
 
-    // Convert gwei → wei correctly: multiply by 1e9
+    // Convert gwei → wei: multiply by 1e9
     const maxFeePerGas = BigInt(Math.round(maxGasGwei * 1e9));
     const gasPrice = await publicClient.getGasPrice();
     const effectiveGasPrice = gasPrice > maxFeePerGas ? maxFeePerGas : gasPrice;
@@ -101,11 +101,11 @@ export async function executeBuy(params: TradeParams): Promise<void> {
       args: [
         account.address,
         account.address,
-        "0x0000000000000000000000000000000000000000" as Address, // no referrer
+        "0x0000000000000000000000000000000000000000" as Address,
         "zora-sniper",
-        0, // marketType
+        0,
         minOrderSize,
-        0n, // no price limit
+        0n,
       ],
       value,
       maxFeePerGas: effectiveGasPrice,
@@ -113,7 +113,6 @@ export async function executeBuy(params: TradeParams): Promise<void> {
 
     logger.info({ txHash, tokenAddress }, "Buy tx submitted");
 
-    // Wait for receipt
     const receipt = await publicClient.waitForTransactionReceipt({ hash: txHash, timeout: 60_000 });
 
     const gasUsedEth = formatEther(receipt.gasUsed * (receipt.effectiveGasPrice ?? effectiveGasPrice));
@@ -126,13 +125,12 @@ export async function executeBuy(params: TradeParams): Promise<void> {
         status: isConfirmed ? "confirmed" : "failed",
         gasUsedEth,
         blockNumber: Number(receipt.blockNumber),
-        // If receipt came back failed, record that the tx reverted
-        ...(isConfirmed ? {} : { failReason: "Transaction reverted on-chain" }),
+        failReason: isConfirmed ? null : "Transaction reverted on-chain",
       })
       .where(eq(tradesTable.id, tradeRow.id))
       .returning();
 
-    // Only increment creator snipe count for confirmed (successful) buys
+    // Only increment creator snipe count on confirmed buys
     if (isConfirmed) {
       await db
         .update(creatorsTable)
@@ -157,7 +155,6 @@ export async function executeBuy(params: TradeParams): Promise<void> {
       .set({ status: "failed", failReason })
       .where(eq(tradesTable.id, tradeRow.id))
       .returning();
-    // Count failed attempts toward today's snipe count
     botState.update({
       snipedToday: botState.get().snipedToday + 1,
       lastEventAt: new Date().toISOString(),
@@ -180,8 +177,6 @@ export async function getWalletBalance(): Promise<{ address: string; balanceEth:
   }
 }
 
-// Synchronously derive wallet address from private key — no RPC call needed.
-// Safe to call at any time; returns null if WALLET_PRIVATE_KEY is missing or malformed.
 export function getWalletAddress(): string | null {
   try {
     const account = privateKeyToAccount(getWalletKey());
