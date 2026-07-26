@@ -121,10 +121,6 @@ export default function Trades() {
             ) : (
               trades.map((trade) => (
                 <TableRow key={trade.id}>
-                  {/* ID */}
-                  <TableCell className="font-mono text-muted-foreground text-xs">
-                  </TableCell>
-
                   {/* Time */}
                   <TableCell className="whitespace-nowrap text-sm">
                     {new Date(trade.timestamp).toLocaleString(undefined, {
