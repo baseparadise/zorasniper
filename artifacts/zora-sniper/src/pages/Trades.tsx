@@ -196,7 +196,7 @@ export default function Trades() {
 
                   {/* Links — Basescan TX, Sell TX, Zora token, Basescan token */}
                   <TableCell>
-                    <div className="flex items-center justify-center gap-2">
+                    <div className="flex items-center justify-center gap-3">
 
                       {/* Basescan buy TX */}
                       <TooltipProvider delayDuration={200}>
@@ -209,11 +209,11 @@ export default function Trades() {
                                 rel="noreferrer"
                                 className="opacity-90 hover:opacity-100 transition-opacity"
                               >
-                                <img src={basescanLogo} alt="Basescan" className="h-4 w-4 flex-none aspect-square rounded-full object-contain" />
+                                <img src={basescanLogo} alt="Basescan" className="h-8 w-8 flex-none aspect-square rounded-full object-contain" />
                               </a>
                             ) : (
                               <span className="opacity-20">
-                                <img src={basescanLogo} alt="Basescan" className="h-4 w-4 flex-none aspect-square rounded-full object-contain" />
+                                <img src={basescanLogo} alt="Basescan" className="h-8 w-8 flex-none aspect-square rounded-full object-contain" />
                               </span>
                             )}
                           </TooltipTrigger>
@@ -234,11 +234,11 @@ export default function Trades() {
                                 rel="noreferrer"
                                 className="opacity-90 hover:opacity-100 transition-opacity"
                               >
-                                <img src={basescanLogo} alt="Basescan" className="h-4 w-4 flex-none aspect-square rounded-full object-contain opacity-60" />
+                                <img src={basescanLogo} alt="Basescan" className="h-8 w-8 flex-none aspect-square rounded-full object-contain opacity-60" />
                               </a>
                             ) : (
                               <span className="opacity-20">
-                                <img src={basescanLogo} alt="Basescan" className="h-4 w-4 flex-none aspect-square rounded-full object-contain" />
+                                <img src={basescanLogo} alt="Basescan" className="h-8 w-8 flex-none aspect-square rounded-full object-contain" />
                               </span>
                             )}
                           </TooltipTrigger>
@@ -258,7 +258,7 @@ export default function Trades() {
                               rel="noreferrer"
                               className="opacity-90 hover:opacity-100 transition-opacity"
                             >
-                              <img src={zoraLogo} alt="Zora" className="h-4 w-4 flex-none aspect-square rounded-full object-contain" />
+                              <img src={zoraLogo} alt="Zora" className="h-8 w-8 flex-none aspect-square rounded-full object-contain" />
                             </a>
                           </TooltipTrigger>
                           <TooltipContent side="top" className="text-xs">
@@ -277,7 +277,7 @@ export default function Trades() {
                               rel="noreferrer"
                               className="opacity-90 hover:opacity-100 transition-opacity"
                             >
-                              <img src={basescanLogo} alt="Basescan" className="h-4 w-4 flex-none aspect-square rounded-full object-contain opacity-80" />
+                              <img src={basescanLogo} alt="Basescan" className="h-8 w-8 flex-none aspect-square rounded-full object-contain opacity-80" />
                             </a>
                           </TooltipTrigger>
                           <TooltipContent side="top" className="text-xs">
