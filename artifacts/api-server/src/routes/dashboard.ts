@@ -1,6 +1,6 @@
 import { Router, type IRouter } from "express";
 import { db, tradesTable, creatorsTable } from "@workspace/db";
-import { eq, count, desc } from "drizzle-orm";
+import { eq, count, desc, gte, and, sql } from "drizzle-orm";
 import { botState } from "../bot/state";
 import { GetDashboardResponse } from "@workspace/api-zod";
 import { getWalletAddress } from "../bot/trader";
@@ -41,19 +41,63 @@ router.get("/dashboard", async (_req, res): Promise<void> => {
   const winCount = soldRow?.total ?? 0;
   const failedTrades = failedRow?.total ?? 0;
 
+  // Today's stats — correct date filter
+  const today = new Date();
+  today.setHours(0, 0, 0, 0);
+
+  const [todayRow] = await db
+    .select({ total: count() })
+    .from(tradesTable)
+    .where(gte(tradesTable.timestamp, today));
+
+  // Real ETH stats via SQL aggregation
+  const [ethSpentRow] = await db
+    .select({
+      total: sql<string>`COALESCE(SUM(NULLIF(buy_amount_eth, '')::numeric), 0)::text`,
+    })
+    .from(tradesTable)
+    .where(eq(tradesTable.status, "confirmed"));
+
+  const [todayEthRow] = await db
+    .select({
+      total: sql<string>`COALESCE(SUM(NULLIF(buy_amount_eth, '')::numeric), 0)::text`,
+    })
+    .from(tradesTable)
+    .where(and(gte(tradesTable.timestamp, today), eq(tradesTable.status, "confirmed")));
+
+  const [ethRecoveredRow] = await db
+    .select({
+      total: sql<string>`COALESCE(SUM(NULLIF(sell_amount_eth, '')::numeric), 0)::text`,
+    })
+    .from(tradesTable)
+    .where(eq(tradesTable.status, "sold"));
+
+  const [pnlRow] = await db
+    .select({
+      total: sql<string>`COALESCE(SUM(NULLIF(pnl_eth, '')::numeric), 0)::text`,
+    })
+    .from(tradesTable);
+
+  const [avgRow] = await db
+    .select({
+      avg: sql<string>`COALESCE(AVG(NULLIF(buy_amount_eth, '')::numeric), 0)::text`,
+    })
+    .from(tradesTable)
+    .where(eq(tradesTable.status, "confirmed"));
+
   const stats = {
     totalTrades,
     successfulTrades: confirmedRow?.total ?? 0,
     failedTrades,
-    totalEthSpent: "0",
-    totalEthRecovered: "0",
-    totalPnlEth: "0",
+    totalEthSpent: ethSpentRow?.total ?? "0",
+    totalEthRecovered: ethRecoveredRow?.total ?? "0",
+    totalPnlEth: pnlRow?.total ?? "0",
     winCount,
     lossCount: failedTrades,
     winRatePercent: totalTrades > 0 ? (winCount / totalTrades) * 100 : 0,
-    avgBuyAmountEth: "0",
-    todayTrades: 0,
-    todayEthSpent: "0",
+    avgBuyAmountEth: avgRow?.avg ?? "0",
+    todayTrades: todayRow?.total ?? 0,
+    todayEthSpent: todayEthRow?.total ?? "0",
   };
 
   const topCreators = await db
