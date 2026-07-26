@@ -95,7 +95,7 @@ export default function Trades() {
         <Table>
           <TableHeader className="bg-muted/30">
             <TableRow>
-              <TableHead className="w-16">ID</TableHead>
+              
               <TableHead>Time</TableHead>
               <TableHead>Token</TableHead>
               <TableHead>Target Creator</TableHead>
@@ -108,13 +108,13 @@ export default function Trades() {
           <TableBody>
             {isLoading ? (
               <TableRow>
-                <TableCell colSpan={8} className="text-center h-32 text-muted-foreground">
+                <TableCell colSpan={7} className="text-center h-32 text-muted-foreground">
                   Loading records...
                 </TableCell>
               </TableRow>
             ) : trades.length === 0 ? (
               <TableRow>
-                <TableCell colSpan={8} className="text-center h-32 text-muted-foreground">
+                <TableCell colSpan={7} className="text-center h-32 text-muted-foreground">
                   No trades found.
                 </TableCell>
               </TableRow>
@@ -123,7 +123,6 @@ export default function Trades() {
                 <TableRow key={trade.id}>
                   {/* ID */}
                   <TableCell className="font-mono text-muted-foreground text-xs">
-                    #{trade.id}
                   </TableCell>
 
                   {/* Time */}
