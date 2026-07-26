@@ -8,9 +8,8 @@ import { Badge } from "@/components/ui/badge";
 import { Select, SelectContent, SelectItem, SelectTrigger, SelectValue } from "@/components/ui/select";
 import { Tooltip, TooltipContent, TooltipProvider, TooltipTrigger } from "@/components/ui/tooltip";
 import { ChevronLeft, ChevronRight, Copy, Check } from "lucide-react";
-
-const ZORA_LOGO = `${import.meta.env.BASE_URL}zora-logo.png`;
-const BASESCAN_LOGO = `${import.meta.env.BASE_URL}basescan-logo.png`;
+import zoraLogo from "@/assets/zora-logo.png";
+import basescanLogo from "@/assets/basescan-logo.png";
 
 type TradeStatusFilter = "all" | "pending" | "confirmed" | "failed" | "sold";
 
@@ -210,11 +209,11 @@ export default function Trades() {
                                 rel="noreferrer"
                                 className="opacity-90 hover:opacity-100 transition-opacity"
                               >
-                                <img src={BASESCAN_LOGO} alt="Basescan" className="h-4 w-4 rounded-full object-cover" />
+                                <img src={basescanLogo} alt="Basescan" className="h-4 w-4 rounded-full object-cover" />
                               </a>
                             ) : (
                               <span className="opacity-20">
-                                <img src={BASESCAN_LOGO} alt="Basescan" className="h-4 w-4 rounded-full object-cover" />
+                                <img src={basescanLogo} alt="Basescan" className="h-4 w-4 rounded-full object-cover" />
                               </span>
                             )}
                           </TooltipTrigger>
@@ -235,11 +234,11 @@ export default function Trades() {
                                 rel="noreferrer"
                                 className="opacity-90 hover:opacity-100 transition-opacity"
                               >
-                                <img src={BASESCAN_LOGO} alt="Basescan" className="h-4 w-4 rounded-full object-cover opacity-60" />
+                                <img src={basescanLogo} alt="Basescan" className="h-4 w-4 rounded-full object-cover opacity-60" />
                               </a>
                             ) : (
                               <span className="opacity-20">
-                                <img src={BASESCAN_LOGO} alt="Basescan" className="h-4 w-4 rounded-full object-cover" />
+                                <img src={basescanLogo} alt="Basescan" className="h-4 w-4 rounded-full object-cover" />
                               </span>
                             )}
                           </TooltipTrigger>
@@ -259,7 +258,7 @@ export default function Trades() {
                               rel="noreferrer"
                               className="opacity-90 hover:opacity-100 transition-opacity"
                             >
-                              <img src={ZORA_LOGO} alt="Zora" className="h-4 w-4 rounded-full object-cover" />
+                              <img src={zoraLogo} alt="Zora" className="h-4 w-4 rounded-full object-cover" />
                             </a>
                           </TooltipTrigger>
                           <TooltipContent side="top" className="text-xs">
@@ -278,7 +277,7 @@ export default function Trades() {
                               rel="noreferrer"
                               className="opacity-90 hover:opacity-100 transition-opacity"
                             >
-                              <img src={BASESCAN_LOGO} alt="Basescan" className="h-4 w-4 rounded-full object-cover opacity-80" />
+                              <img src={basescanLogo} alt="Basescan" className="h-4 w-4 rounded-full object-cover opacity-80" />
                             </a>
                           </TooltipTrigger>
                           <TooltipContent side="top" className="text-xs">
