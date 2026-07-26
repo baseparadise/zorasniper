@@ -1,6 +1,6 @@
 import { Router, type IRouter } from "express";
 import { db, tradesTable } from "@workspace/db";
-import { eq, count, sum, desc } from "drizzle-orm";
+import { eq, count, desc, gte, and, sql } from "drizzle-orm";
 import {
   ListTradesQueryParams,
   ListTradesResponse,
@@ -36,49 +36,85 @@ router.get("/trades", async (req, res): Promise<void> => {
 });
 
 router.get("/trades/stats", async (_req, res): Promise<void> => {
-  const all = await db.select({ total: count() }).from(tradesTable);
-  const confirmed = await db
+  const [allRow] = await db.select({ total: count() }).from(tradesTable);
+  const [confirmedRow] = await db
     .select({ total: count() })
     .from(tradesTable)
     .where(eq(tradesTable.status, "confirmed"));
-  const failed = await db
+  const [failedRow] = await db
     .select({ total: count() })
     .from(tradesTable)
     .where(eq(tradesTable.status, "failed"));
-  const sold = await db
+  const [soldRow] = await db
     .select({ total: count() })
     .from(tradesTable)
     .where(eq(tradesTable.status, "sold"));
 
-  const totalTrades = all[0]?.total ?? 0;
-  const successfulTrades = confirmed[0]?.total ?? 0;
-  const failedTrades = failed[0]?.total ?? 0;
-  const soldTrades = sold[0]?.total ?? 0;
-  const winCount = soldTrades; // simplified: sold = win
+  const totalTrades = allRow?.total ?? 0;
+  const successfulTrades = confirmedRow?.total ?? 0;
+  const failedTrades = failedRow?.total ?? 0;
+  const soldTrades = soldRow?.total ?? 0;
+  const winCount = soldTrades;
   const lossCount = failedTrades;
 
-  // Today's stats
+  // Today's stats — use a proper date filter
   const today = new Date();
   today.setHours(0, 0, 0, 0);
 
-  const todayRows = await db
+  const [todayRow] = await db
     .select({ total: count() })
+    .from(tradesTable)
+    .where(gte(tradesTable.timestamp, today));
+  const todayTrades = todayRow?.total ?? 0;
+
+  // Real ETH stats via SQL aggregation on text→numeric cast
+  const [ethSpentRow] = await db
+    .select({
+      total: sql<string>`COALESCE(SUM(NULLIF(buy_amount_eth, '')::numeric), 0)::text`,
+    })
+    .from(tradesTable)
+    .where(eq(tradesTable.status, "confirmed"));
+
+  const [todayEthRow] = await db
+    .select({
+      total: sql<string>`COALESCE(SUM(NULLIF(buy_amount_eth, '')::numeric), 0)::text`,
+    })
+    .from(tradesTable)
+    .where(and(gte(tradesTable.timestamp, today), eq(tradesTable.status, "confirmed")));
+
+  const [ethRecoveredRow] = await db
+    .select({
+      total: sql<string>`COALESCE(SUM(NULLIF(sell_amount_eth, '')::numeric), 0)::text`,
+    })
+    .from(tradesTable)
+    .where(eq(tradesTable.status, "sold"));
+
+  const [pnlRow] = await db
+    .select({
+      total: sql<string>`COALESCE(SUM(NULLIF(pnl_eth, '')::numeric), 0)::text`,
+    })
     .from(tradesTable);
-  const todayTrades = todayRows[0]?.total ?? 0;
+
+  const [avgRow] = await db
+    .select({
+      avg: sql<string>`COALESCE(AVG(NULLIF(buy_amount_eth, '')::numeric), 0)::text`,
+    })
+    .from(tradesTable)
+    .where(eq(tradesTable.status, "confirmed"));
 
   const stats = {
     totalTrades,
     successfulTrades,
     failedTrades,
-    totalEthSpent: "0",
-    totalEthRecovered: "0",
-    totalPnlEth: "0",
+    totalEthSpent: ethSpentRow?.total ?? "0",
+    totalEthRecovered: ethRecoveredRow?.total ?? "0",
+    totalPnlEth: pnlRow?.total ?? "0",
     winCount,
     lossCount,
     winRatePercent: totalTrades > 0 ? (winCount / totalTrades) * 100 : 0,
-    avgBuyAmountEth: "0",
+    avgBuyAmountEth: avgRow?.avg ?? "0",
     todayTrades,
-    todayEthSpent: "0",
+    todayEthSpent: todayEthRow?.total ?? "0",
   };
 
   res.json(GetTradeStatsResponse.parse(stats));
