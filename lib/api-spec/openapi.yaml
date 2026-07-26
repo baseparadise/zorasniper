@@ -197,7 +197,7 @@ paths:
           in: query
           schema:
             type: string
-            enum: [pending, confirmed, failed, sold]
+            enum: [pending, confirmed, failed, sold, skipped]
       responses:
         "200":
           description: Trade list
@@ -440,7 +440,7 @@ components:
           format: date-time
         status:
           type: string
-          enum: [pending, confirmed, failed, sold]
+          enum: [pending, confirmed, failed, sold, skipped]
         sellTxHash:
           type: ["string", "null"]
         sellAmountEth:

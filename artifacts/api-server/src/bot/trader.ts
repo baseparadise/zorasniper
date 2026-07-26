@@ -166,8 +166,8 @@ export async function executeBuy(params: TradeParams): Promise<void> {
     broadcast("trade", updated);
     logger.info({ txHash, status: updated.status, tokenName }, "Buy settled");
   } catch (err) {
-    logger.error({ err, tokenAddress }, "Buy failed");
     const failReason = (err instanceof Error ? err.message : String(err)).slice(0, 500);
+    logger.error({ err, tokenAddress, failReason }, "Buy failed");
     const [updated] = await db
       .update(tradesTable)
       .set({ status: "failed", failReason })
