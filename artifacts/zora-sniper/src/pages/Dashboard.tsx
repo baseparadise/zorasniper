@@ -1,7 +1,7 @@
 import { useEffect } from "react";
 import { useQueryClient } from "@tanstack/react-query";
-import { 
-  useGetDashboard, 
+import {
+  useGetDashboard,
   getGetDashboardQueryKey,
   useStartBot,
   useStopBot,
@@ -10,11 +10,71 @@ import {
 } from "@workspace/api-client-react";
 import { useWebSocket } from "@/hooks/useWebSocket";
 import { formatEth, formatAddress, formatUptime, getBasescanTxLink, getBasescanAddressLink, cn } from "@/lib/utils";
-import { Card, CardContent, CardHeader, CardTitle } from "@/components/ui/card";
 import { Button } from "@/components/ui/button";
-import { Badge } from "@/components/ui/badge";
-import { Play, Square, Activity, Wallet, Hash, TrendingUp, TrendingDown, Clock, Crosshair, ExternalLink, AlertCircle } from "lucide-react";
+import {
+  Play, Square, Activity, Wallet, Hash, TrendingUp, TrendingDown,
+  Clock, Crosshair, ExternalLink, AlertCircle, Zap, BarChart3
+} from "lucide-react";
 import { useToast } from "@/hooks/use-toast";
+
+// ── Helpers ──────────────────────────────────────────────────────────────────
+
+function StatusPill({ running }: { running: boolean }) {
+  return (
+    <div className={cn(
+      "flex items-center gap-1.5 rounded-full px-2.5 py-1 border text-xs font-semibold",
+      running
+        ? "bg-green-500/10 border-green-500/20 text-green-400"
+        : "bg-white/5 border-white/10 text-white/30"
+    )}>
+      <div className={cn("w-1.5 h-1.5 rounded-full", running ? "bg-green-400 animate-pulse" : "bg-white/20")} />
+      {running ? "ONLINE" : "OFFLINE"}
+    </div>
+  );
+}
+
+function StatCard({
+  label, value, sub, icon: Icon, accent
+}: {
+  label: string; value: string; sub?: string; icon: any; accent?: string;
+}) {
+  return (
+    <div className="rounded-2xl border border-white/8 bg-white/[0.04] p-4 flex flex-col gap-3 hover:border-white/12 transition-all">
+      <div className="flex items-center justify-between">
+        <span className="text-white/40 text-xs font-medium uppercase tracking-wider">{label}</span>
+        <div className={cn(
+          "w-8 h-8 rounded-xl flex items-center justify-center",
+          accent ?? "bg-violet-600/20"
+        )}>
+          <Icon className="w-4 h-4 text-violet-400" />
+        </div>
+      </div>
+      <div>
+        <p className="text-white font-bold text-xl font-mono">{value}</p>
+        {sub && <p className="text-white/30 text-xs mt-0.5 font-mono">{sub}</p>}
+      </div>
+    </div>
+  );
+}
+
+function TradePill({ status }: { status: string }) {
+  const map: Record<string, string> = {
+    confirmed: "bg-green-500/10 border-green-500/20 text-green-400",
+    sold:      "bg-blue-500/10 border-blue-500/20 text-blue-400",
+    pending:   "bg-amber-500/10 border-amber-500/20 text-amber-400",
+    failed:    "bg-red-500/10 border-red-500/20 text-red-400",
+  };
+  return (
+    <span className={cn(
+      "text-[10px] font-bold px-2 py-0.5 rounded-full border uppercase tracking-wide",
+      map[status] ?? "bg-white/5 border-white/10 text-white/40"
+    )}>
+      {status}
+    </span>
+  );
+}
+
+// ── Component ────────────────────────────────────────────────────────────────
 
 export default function Dashboard() {
   const { data, isLoading } = useGetDashboard();
@@ -28,7 +88,7 @@ export default function Dashboard() {
   useEffect(() => {
     const unsubStatus = subscribe("status", (payload) => {
       const status = payload as BotStatus;
-      queryClient.setQueryData(getGetDashboardQueryKey(), (old: any) => 
+      queryClient.setQueryData(getGetDashboardQueryKey(), (old: any) =>
         old ? { ...old, botStatus: status } : old
       );
     });
@@ -39,27 +99,17 @@ export default function Dashboard() {
         if (!old) return old;
         const exists = old.recentTrades.some((t: Trade) => t.id === trade.id);
         if (exists) {
-          return {
-            ...old,
-            recentTrades: old.recentTrades.map((t: Trade) => t.id === trade.id ? trade : t)
-          };
+          return { ...old, recentTrades: old.recentTrades.map((t: Trade) => t.id === trade.id ? trade : t) };
         }
-        return {
-          ...old,
-          recentTrades: [trade, ...old.recentTrades].slice(0, 50)
-        };
+        return { ...old, recentTrades: [trade, ...old.recentTrades].slice(0, 50) };
       });
     });
 
-    return () => {
-      unsubStatus();
-      unsubTrade();
-    };
+    return () => { unsubStatus(); unsubTrade(); };
   }, [subscribe, queryClient]);
 
   const handleTogglePower = () => {
     if (!data?.botStatus) return;
-    
     if (data.botStatus.running) {
       stopBot.mutate(undefined, {
         onSuccess: (status) => {
@@ -81,8 +131,8 @@ export default function Dashboard() {
 
   if (isLoading || !data) {
     return (
-      <div className="p-8 flex items-center justify-center min-h-[50vh]">
-        <div className="animate-pulse text-muted-foreground font-mono">INITIALIZING TERMINAL...</div>
+      <div className="flex items-center justify-center min-h-[50vh]">
+        <div className="text-violet-400/60 font-mono text-sm animate-pulse">INITIALIZING TERMINAL...</div>
       </div>
     );
   }
@@ -90,197 +140,162 @@ export default function Dashboard() {
   const { botStatus, stats, recentTrades } = data;
 
   return (
-    <div className="p-8 space-y-8 max-w-7xl mx-auto">
-      <div className="flex items-center justify-between">
-        <h1 className="text-3xl font-bold tracking-tight flex items-center gap-3">
-          Command Center
-          {botStatus.running ? (
-            <Badge variant="success" className="animate-pulse flex items-center gap-1.5 px-2.5 py-1 text-xs">
-              <Activity className="h-3 w-3" /> ONLINE
-            </Badge>
-          ) : (
-            <Badge variant="secondary" className="flex items-center gap-1.5 px-2.5 py-1 text-xs text-muted-foreground">
-              <Square className="h-3 w-3" /> OFFLINE
-            </Badge>
-          )}
-        </h1>
-        
-        <Button 
-          size="lg"
-          variant={botStatus.running ? "destructive" : "default"}
-          onClick={handleTogglePower}
-          disabled={startBot.isPending || stopBot.isPending}
-          className="font-bold tracking-widest uppercase w-48 shadow-lg"
-        >
-          {startBot.isPending || stopBot.isPending ? "WAIT..." : 
-            botStatus.running ? (
-              <><Square className="h-4 w-4 mr-2" fill="currentColor" /> STOP SYSTEM</>
-            ) : (
-              <><Play className="h-4 w-4 mr-2" fill="currentColor" /> INITIATE SNIPE</>
-            )
-          }
-        </Button>
-      </div>
+    <div className="p-4 space-y-4 pb-8">
 
-      <div className="grid grid-cols-1 md:grid-cols-2 lg:grid-cols-4 gap-4">
-        <Card className="bg-card">
-          <CardHeader className="pb-2 flex flex-row items-center justify-between">
-            <CardTitle className="text-sm font-medium text-muted-foreground uppercase tracking-wider">Wallet Balance</CardTitle>
-            <Wallet className="h-4 w-4 text-muted-foreground" />
-          </CardHeader>
-          <CardContent>
-            <div className="text-2xl font-bold font-mono">
-              {formatEth(botStatus.walletBalanceEth)} <span className="text-sm text-muted-foreground font-sans">ETH</span>
+      {/* ── Bot control card ── */}
+      <div className="rounded-2xl border border-white/8 bg-white/[0.04] p-4">
+        <div className="flex items-center justify-between">
+          <div className="flex items-center gap-3">
+            <div className="relative">
+              <div className="absolute inset-0 rounded-xl bg-violet-500/20 blur-sm" />
+              <div className="relative w-10 h-10 rounded-xl bg-gradient-to-br from-violet-600/30 to-indigo-700/30 border border-violet-500/20 flex items-center justify-center">
+                <Crosshair className="w-5 h-5 text-violet-400" />
+              </div>
             </div>
-            {botStatus.walletAddress ? (
-              <a
-                href={getBasescanAddressLink(botStatus.walletAddress)}
-                target="_blank"
-                rel="noreferrer"
-                className="flex items-center gap-1 mt-1 text-xs font-mono text-blue-500 hover:text-blue-400 transition-colors group"
-                title={botStatus.walletAddress}
-              >
-                <span>{formatAddress(botStatus.walletAddress)}</span>
-                <ExternalLink className="h-3 w-3 opacity-60 group-hover:opacity-100" />
-              </a>
-            ) : (
-              <p className="flex items-center gap-1 mt-1 text-xs font-mono text-amber-500">
-                <AlertCircle className="h-3 w-3" />
-                KEY NOT SET
-              </p>
-            )}
-          </CardContent>
-        </Card>
-
-        <Card>
-          <CardHeader className="pb-2 flex flex-row items-center justify-between">
-            <CardTitle className="text-sm font-medium text-muted-foreground uppercase tracking-wider">Total Trades</CardTitle>
-            <Hash className="h-4 w-4 text-muted-foreground" />
-          </CardHeader>
-          <CardContent>
-            <div className="text-2xl font-bold font-mono">{stats.totalTrades}</div>
-            <p className="text-xs text-muted-foreground mt-1">
-              {stats.todayTrades} today
-            </p>
-          </CardContent>
-        </Card>
-
-        <Card>
-          <CardHeader className="pb-2 flex flex-row items-center justify-between">
-            <CardTitle className="text-sm font-medium text-muted-foreground uppercase tracking-wider">System Uptime</CardTitle>
-            <Clock className="h-4 w-4 text-muted-foreground" />
-          </CardHeader>
-          <CardContent>
-            <div className="text-2xl font-bold font-mono">{formatUptime(botStatus.uptimeSeconds)}</div>
-            <p className="text-xs text-muted-foreground mt-1">
-              Last event: {botStatus.lastEventAt ? new Date(botStatus.lastEventAt).toLocaleTimeString() : 'Never'}
-            </p>
-          </CardContent>
-        </Card>
-
-        <Card>
-          <CardHeader className="pb-2 flex flex-row items-center justify-between">
-            <CardTitle className="text-sm font-medium text-muted-foreground uppercase tracking-wider">Total PNL</CardTitle>
-            {parseFloat(stats.totalPnlEth) >= 0 ? 
-              <TrendingUp className="h-4 w-4 text-green-500" /> : 
-              <TrendingDown className="h-4 w-4 text-red-500" />
-            }
-          </CardHeader>
-          <CardContent>
-            <div className={cn(
-              "text-2xl font-bold font-mono",
-              parseFloat(stats.totalPnlEth) > 0 ? "text-green-600 dark:text-green-500" : 
-              parseFloat(stats.totalPnlEth) < 0 ? "text-red-600 dark:text-red-500" : ""
-            )}>
-              {parseFloat(stats.totalPnlEth) > 0 ? "+" : ""}{formatEth(stats.totalPnlEth)} <span className="text-sm font-sans opacity-70">ETH</span>
+            <div>
+              <p className="text-white font-bold text-sm">Command Center</p>
+              <div className="flex items-center gap-2 mt-0.5">
+                <StatusPill running={botStatus.running} />
+                {botStatus.running && botStatus.uptime && (
+                  <span className="text-white/25 text-[10px] font-mono">{formatUptime(botStatus.uptime)}</span>
+                )}
+              </div>
             </div>
-            <p className="text-xs text-muted-foreground mt-1 font-mono">
-              Win Rate: {stats.winRatePercent?.toFixed(1)}%
-            </p>
-          </CardContent>
-        </Card>
-      </div>
-
-      <Card className="border-border shadow-sm">
-        <CardHeader className="border-b border-border bg-muted/20">
-          <div className="flex items-center justify-between">
-            <CardTitle className="flex items-center gap-2">
-              <Crosshair className="h-5 w-5 text-blue-500" />
-              Live Activity Feed
-            </CardTitle>
           </div>
-        </CardHeader>
-        <CardContent className="p-0">
-          {recentTrades.length === 0 ? (
-            <div className="p-8 text-center text-muted-foreground font-mono text-sm">
-              NO RECENT ACTIVITY
-            </div>
-          ) : (
-            <div className="divide-y divide-border">
-              {recentTrades.map((trade) => (
-                <div key={trade.id} className="p-4 flex items-center justify-between hover:bg-muted/30 transition-colors">
-                  <div className="flex items-center gap-4">
-                    <div className={cn(
-                      "w-2 h-2 rounded-full",
-                      trade.status === "confirmed" || trade.status === "sold" ? "bg-green-500 shadow-[0_0_8px_rgba(34,197,94,0.6)]" :
-                      trade.status === "pending" ? "bg-blue-500 animate-pulse shadow-[0_0_8px_rgba(59,130,246,0.6)]" :
-                      "bg-red-500 shadow-[0_0_8px_rgba(239,68,68,0.6)]"
-                    )} />
-                    <div>
-                      <div className="flex items-center gap-2">
-                        <span className="font-bold text-sm">{trade.tokenName}</span>
-                        <span className="text-xs font-mono text-muted-foreground bg-muted px-1.5 py-0.5 rounded">
-                          {trade.tokenSymbol}
-                        </span>
-                      </div>
-                      <div className="text-xs text-muted-foreground mt-1 font-mono flex items-center gap-2">
-                        {new Date(trade.timestamp).toLocaleTimeString()}
-                        <span className="opacity-50">•</span>
-                        Creator: {formatAddress(trade.creatorAddress)}
-                      </div>
-                    </div>
-                  </div>
-                  
-                  <div className="flex items-center gap-6">
-                    <div className="text-right">
-                      <div className="text-sm font-mono font-medium">
-                        {formatEth(trade.buyAmountEth)} ETH
-                      </div>
-                      {trade.status === 'sold' && trade.pnlEth && (
-                        <div className={cn(
-                          "text-xs font-mono mt-0.5",
-                          parseFloat(trade.pnlEth) > 0 ? "text-green-500" : "text-red-500"
-                        )}>
-                          {parseFloat(trade.pnlEth) > 0 ? "+" : ""}{formatEth(trade.pnlEth)} ETH
-                        </div>
-                      )}
-                    </div>
-                    
-                    <Badge variant={
-                      trade.status === "confirmed" ? "success" :
-                      trade.status === "sold" ? "default" :
-                      trade.status === "pending" ? "pending" : "destructive"
-                    } className="uppercase w-20 justify-center">
-                      {trade.status}
-                    </Badge>
 
-                    {trade.txHash && (
-                      <a 
-                        href={getBasescanTxLink(trade.txHash)} 
-                        target="_blank" 
-                        rel="noreferrer"
-                        className="text-xs text-blue-500 hover:text-blue-600 hover:underline font-mono"
-                      >
-                        TX ↗
-                      </a>
-                    )}
+          <button
+            onClick={handleTogglePower}
+            disabled={startBot.isPending || stopBot.isPending}
+            className={cn(
+              "h-11 px-5 rounded-2xl text-sm font-bold transition-all duration-200 flex items-center gap-2 active:scale-[0.97]",
+              botStatus.running
+                ? "bg-white/[0.07] border border-white/15 text-white hover:bg-white/10"
+                : "bg-gradient-to-r from-violet-600 to-violet-500 hover:from-violet-500 hover:to-violet-400 text-white shadow-lg shadow-violet-500/20"
+            )}
+          >
+            {botStatus.running
+              ? <><Square className="w-4 h-4" /> Stop</>
+              : <><Play className="w-4 h-4" /> Start</>
+            }
+          </button>
+        </div>
+
+        {botStatus.errorMessage && (
+          <div className="mt-3 flex items-center gap-2 rounded-xl bg-red-500/8 border border-red-500/15 px-3 py-2.5">
+            <AlertCircle className="w-4 h-4 text-red-400 shrink-0" />
+            <span className="text-red-300/80 text-xs font-mono">{botStatus.errorMessage}</span>
+          </div>
+        )}
+      </div>
+
+      {/* ── Wallet info ── */}
+      {botStatus.walletAddress && (
+        <div className="rounded-2xl border border-white/8 bg-white/[0.04] px-4 py-3 flex items-center justify-between">
+          <div className="flex items-center gap-2">
+            <Wallet className="w-3.5 h-3.5 text-violet-400/60" />
+            <span className="text-white/40 text-xs">Wallet</span>
+          </div>
+          <div className="flex items-center gap-2">
+            <span className="text-white/70 text-xs font-mono">{formatAddress(botStatus.walletAddress)}</span>
+            <a href={getBasescanAddressLink(botStatus.walletAddress)} target="_blank" rel="noreferrer">
+              <ExternalLink className="w-3 h-3 text-violet-400/50 hover:text-violet-400 transition-colors" />
+            </a>
+          </div>
+        </div>
+      )}
+
+      {/* ── Stats grid ── */}
+      <div className="grid grid-cols-2 gap-3">
+        <StatCard
+          label="Total Snipes"
+          value={String(stats.totalTrades)}
+          icon={Hash}
+        />
+        <StatCard
+          label="Confirmed"
+          value={String(stats.confirmedTrades)}
+          icon={Activity}
+          accent="bg-green-500/20"
+        />
+        <StatCard
+          label="Volume (ETH)"
+          value={formatEth(stats.totalVolumeEth)}
+          icon={BarChart3}
+          accent="bg-blue-500/20"
+        />
+        <StatCard
+          label="Total PNL"
+          value={(parseFloat(stats.totalPnlEth ?? "0") >= 0 ? "+" : "") + formatEth(stats.totalPnlEth ?? "0")}
+          icon={parseFloat(stats.totalPnlEth ?? "0") >= 0 ? TrendingUp : TrendingDown}
+          accent={parseFloat(stats.totalPnlEth ?? "0") >= 0 ? "bg-green-500/20" : "bg-red-500/20"}
+        />
+      </div>
+
+      {/* ── Recent trades ── */}
+      <div>
+        <div className="flex items-center justify-between mb-3 px-1">
+          <p className="text-white/60 text-xs font-semibold uppercase tracking-wider">Recent Trades</p>
+          <span className="text-white/25 text-[10px] font-mono">{recentTrades.length} items</span>
+        </div>
+
+        {recentTrades.length === 0 ? (
+          <div className="rounded-2xl border border-white/8 bg-white/[0.03] py-10 flex flex-col items-center gap-2">
+            <Crosshair className="w-8 h-8 text-white/10" />
+            <p className="text-white/25 text-sm">No trades yet</p>
+          </div>
+        ) : (
+          <div className="space-y-2">
+            {recentTrades.slice(0, 20).map((trade) => (
+              <div key={trade.id} className="rounded-2xl border border-white/8 bg-white/[0.04] px-4 py-3.5 flex items-center gap-3 hover:border-white/12 transition-all">
+                {/* Avatar */}
+                <div className="w-9 h-9 rounded-xl bg-gradient-to-br from-violet-600/40 to-indigo-700/40 border border-violet-500/20 flex items-center justify-center shrink-0">
+                  <Zap className="w-4 h-4 text-violet-400" />
+                </div>
+
+                {/* Info */}
+                <div className="flex-1 min-w-0">
+                  <div className="flex items-center gap-2">
+                    <span className="text-white font-semibold text-sm font-mono truncate">
+                      {formatAddress(trade.tokenAddress)}
+                    </span>
+                    <TradePill status={trade.status} />
+                  </div>
+                  <div className="flex items-center gap-1.5 mt-0.5">
+                    <Clock className="w-3 h-3 text-white/20" />
+                    <span className="text-white/30 text-[11px]">
+                      {new Date(trade.timestamp).toLocaleTimeString()}
+                    </span>
+                    <span className="text-white/15">·</span>
+                    <span className="text-white/30 text-[11px] font-mono">
+                      {formatAddress(trade.creatorAddress)}
+                    </span>
                   </div>
                 </div>
-              ))}
-            </div>
-          )}
-        </CardContent>
-      </Card>
+
+                {/* Right side */}
+                <div className="flex flex-col items-end gap-1 shrink-0">
+                  <span className="text-white font-mono text-sm font-semibold">
+                    {formatEth(trade.buyAmountEth)} ETH
+                  </span>
+                  {trade.pnlEth && (
+                    <span className={cn(
+                      "text-xs font-mono",
+                      parseFloat(trade.pnlEth) > 0 ? "text-green-400" : "text-red-400"
+                    )}>
+                      {parseFloat(trade.pnlEth) > 0 ? "+" : ""}{formatEth(trade.pnlEth)}
+                    </span>
+                  )}
+                  {trade.txHash && (
+                    <a href={getBasescanTxLink(trade.txHash)} target="_blank" rel="noreferrer">
+                      <ExternalLink className="w-3 h-3 text-violet-400/40 hover:text-violet-400 transition-colors" />
+                    </a>
+                  )}
+                </div>
+              </div>
+            ))}
+          </div>
+        )}
+      </div>
     </div>
   );
 }

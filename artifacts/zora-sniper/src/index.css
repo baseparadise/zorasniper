@@ -43,87 +43,100 @@
   --font-sans: "Inter", sans-serif;
   --font-mono: "Space Mono", monospace;
 
-  --radius-sm: 0.125rem;
-  --radius-md: 0.25rem;
-  --radius-lg: 0.5rem;
-  --radius-xl: 1rem;
+  --radius-sm: 0.5rem;
+  --radius-md: 0.75rem;
+  --radius-lg: 1rem;
+  --radius-xl: 1.25rem;
 }
 
+/* ── Always dark — violet/indigo brand ─────────────────────────────────── */
 :root {
-  --background: 240 10% 98%;
-  --foreground: 240 10% 4%;
-  --border: 240 6% 90%;
-  --input: 240 6% 90%;
-  --ring: 240 10% 4%;
+  color-scheme: dark;
 
-  --card: 0 0% 100%;
-  --card-foreground: 240 10% 4%;
-  --card-border: 240 6% 90%;
+  /* Base */
+  --background: 240 35% 4%;        /* #080810 */
+  --foreground: 0 0% 95%;
+  --border: 240 20% 14%;
+  --input: 240 20% 12%;
+  --ring: 262 83% 68%;              /* violet-500 */
 
-  --popover: 0 0% 100%;
-  --popover-foreground: 240 10% 4%;
-  --popover-border: 240 6% 90%;
+  /* Card — glass */
+  --card: 240 30% 6%;
+  --card-foreground: 0 0% 95%;
+  --card-border: 240 20% 14%;
 
-  --primary: 240 10% 4%;
-  --primary-foreground: 0 0% 98%;
+  /* Popover */
+  --popover: 240 30% 6%;
+  --popover-foreground: 0 0% 95%;
+  --popover-border: 240 20% 14%;
 
-  --secondary: 240 5% 96%;
-  --secondary-foreground: 240 10% 4%;
+  /* Primary — violet */
+  --primary: 262 83% 58%;           /* violet-600 */
+  --primary-foreground: 0 0% 100%;
 
-  --muted: 240 5% 96%;
-  --muted-foreground: 240 4% 46%;
+  /* Secondary */
+  --secondary: 240 20% 10%;
+  --secondary-foreground: 0 0% 90%;
 
-  --accent: 240 5% 96%;
-  --accent-foreground: 240 10% 4%;
+  /* Muted */
+  --muted: 240 20% 10%;
+  --muted-foreground: 240 15% 50%;
 
-  --destructive: 0 84% 60%;
+  /* Accent */
+  --accent: 240 20% 12%;
+  --accent-foreground: 0 0% 90%;
+
+  /* Destructive */
+  --destructive: 0 63% 50%;
   --destructive-foreground: 0 0% 98%;
 
-  --radius: 0.25rem;
-}
-
-.dark {
-  --background: 240 10% 4%;
-  --foreground: 0 0% 98%;
-  --border: 240 6% 15%;
-  --input: 240 6% 15%;
-  --ring: 240 6% 80%;
-
-  --card: 240 10% 6%;
-  --card-foreground: 0 0% 98%;
-  --card-border: 240 6% 15%;
-
-  --popover: 240 10% 6%;
-  --popover-foreground: 0 0% 98%;
-  --popover-border: 240 6% 15%;
-
-  --primary: 0 0% 98%;
-  --primary-foreground: 240 10% 4%;
-
-  --secondary: 240 6% 15%;
-  --secondary-foreground: 0 0% 98%;
-
-  --muted: 240 6% 15%;
-  --muted-foreground: 240 4% 60%;
-
-  --accent: 240 6% 15%;
-  --accent-foreground: 0 0% 98%;
-
-  --destructive: 0 62.8% 30.6%;
-  --destructive-foreground: 0 0% 98%;
+  --radius: 1rem;
 }
 
 @layer base {
   * {
     @apply border-border;
   }
+
+  html, body, #root {
+    height: 100%;
+  }
+
   body {
     @apply font-sans antialiased bg-background text-foreground;
+    background-color: #080810;
   }
+
   h1, h2, h3, h4, h5, h6 {
     @apply font-semibold tracking-tight;
   }
+
   table th, .mono, [data-mono] {
     @apply font-mono text-sm;
   }
+}
+
+/* ── Scrollbar ─────────────────────────────────────────────────────────── */
+::-webkit-scrollbar {
+  width: 4px;
+  height: 4px;
+}
+::-webkit-scrollbar-track {
+  background: transparent;
+}
+::-webkit-scrollbar-thumb {
+  background: rgba(139,92,246,0.25);
+  border-radius: 9999px;
+}
+::-webkit-scrollbar-thumb:hover {
+  background: rgba(139,92,246,0.45);
+}
+
+/* ── Shake animation (access gate) ────────────────────────────────────── */
+@keyframes shake {
+  0%, 100% { transform: translateX(0); }
+  20%       { transform: translateX(-8px); }
+  40%       { transform: translateX(8px); }
+  60%       { transform: translateX(-5px); }
+  80%       { transform: translateX(5px); }
 }

@@ -1,27 +1,23 @@
 import { useState } from "react";
 import { useQueryClient } from "@tanstack/react-query";
-import { 
-  useListCreators, 
-  useAddCreator, 
-  useRemoveCreator, 
+import {
+  useListCreators,
+  useAddCreator,
+  useRemoveCreator,
   useUpdateCreator,
-  getListCreatorsQueryKey 
+  getListCreatorsQueryKey
 } from "@workspace/api-client-react";
 import type { Creator } from "@workspace/api-client-react";
-import { Card, CardContent, CardHeader, CardTitle } from "@/components/ui/card";
 import { Input } from "@/components/ui/input";
-import { Button } from "@/components/ui/button";
-import { Table, TableBody, TableCell, TableHead, TableHeader, TableRow } from "@/components/ui/table";
 import { Switch } from "@/components/ui/switch";
-import { Badge } from "@/components/ui/badge";
 import { Sheet, SheetContent, SheetHeader, SheetTitle, SheetDescription } from "@/components/ui/sheet";
 import { Select, SelectContent, SelectItem, SelectTrigger, SelectValue } from "@/components/ui/select";
 import { Separator } from "@/components/ui/separator";
-import { Trash2, UserPlus, ExternalLink, SlidersHorizontal, Globe } from "lucide-react";
+import { Trash2, UserPlus, ExternalLink, SlidersHorizontal, Globe, Users, Zap, Check } from "lucide-react";
 import { useToast } from "@/hooks/use-toast";
-import { formatAddress, getBasescanAddressLink } from "@/lib/utils";
+import { formatAddress, getBasescanAddressLink, cn } from "@/lib/utils";
 
-// ── Per-wallet settings sheet ──────────────────────────────────────────────
+// ── Per-wallet settings sheet ────────────────────────────────────────────────
 
 interface WalletSettingsSheetProps {
   creator: Creator | null;
@@ -40,227 +36,88 @@ function WalletSettingsSheet({ creator, onClose }: WalletSettingsSheetProps) {
   const [maxGas, setMaxGas] = useState<string>(
     creator?.maxGasGwei != null ? String(creator.maxGasGwei) : ""
   );
-  const [maxBuysPerDay, setMaxBuysPerDay] = useState<string>(
-    creator?.maxBuysPerDay != null ? String(creator.maxBuysPerDay) : ""
-  );
-  const [autoSellMode, setAutoSellMode] = useState<"global" | "on" | "off">(
-    creator?.autoSell === true ? "on" : creator?.autoSell === false ? "off" : "global"
-  );
-  const [takeProfit, setTakeProfit] = useState<string>(
-    creator?.takeProfitPercent != null ? String(creator.takeProfitPercent) : ""
-  );
-  const [stopLoss, setStopLoss] = useState<string>(
-    creator?.stopLossPercent != null ? String(creator.stopLossPercent) : ""
-  );
 
   if (!creator) return null;
 
   const handleSave = () => {
-    const autoSellValue =
-      autoSellMode === "on" ? true : autoSellMode === "off" ? false : null;
-
     updateCreator.mutate(
       {
         address: creator.address,
         data: {
-          buyAmountEth: buyAmount.trim() !== "" ? buyAmount.trim() : null,
-          slippagePercent: slippage.trim() !== "" ? parseFloat(slippage) : null,
-          maxGasGwei: maxGas.trim() !== "" ? parseFloat(maxGas) : null,
-          maxBuysPerDay: maxBuysPerDay.trim() !== "" ? parseInt(maxBuysPerDay, 10) : null,
-          autoSell: autoSellValue,
-          takeProfitPercent:
-            autoSellMode === "on" && takeProfit.trim() !== ""
-              ? parseFloat(takeProfit)
-              : null,
-          stopLossPercent:
-            autoSellMode === "on" && stopLoss.trim() !== ""
-              ? parseFloat(stopLoss)
-              : null,
-        },
+          buyAmountEth: buyAmount || undefined,
+          slippagePercent: slippage ? Number(slippage) : undefined,
+          maxGasGwei: maxGas ? Number(maxGas) : undefined,
+        }
       },
       {
         onSuccess: () => {
           queryClient.invalidateQueries({ queryKey: getListCreatorsQueryKey() });
-          toast({
-            title: "Settings Saved",
-            description: `Per-wallet settings updated for ${creator.label || formatAddress(creator.address)}.`,
-          });
+          toast({ title: "Settings saved", description: `Updated settings for ${formatAddress(creator.address)}` });
           onClose();
         },
-        onError: () =>
-          toast({
-            variant: "destructive",
-            title: "Error",
-            description: "Failed to save per-wallet settings.",
-          }),
+        onError: () => toast({ variant: "destructive", title: "Error", description: "Failed to save settings." })
       }
     );
   };
 
-  const handleReset = () => {
-    setBuyAmount("");
-    setSlippage("");
-    setMaxGas("");
-    setMaxBuysPerDay("");
-    setAutoSellMode("global");
-    setTakeProfit("");
-    setStopLoss("");
-  };
+  const inputClass = "bg-white/[0.07] border border-white/15 rounded-xl text-white placeholder-white/20 text-sm focus:ring-violet-500/40 focus:border-violet-400/50 h-11";
 
   return (
-    <SheetContent className="w-full sm:max-w-md overflow-y-auto">
+    <SheetContent className="bg-[#0d0d1a] border-white/10 text-white">
       <SheetHeader className="mb-6">
-        <SheetTitle className="flex items-center gap-2">
-          <SlidersHorizontal className="h-5 w-5 text-blue-500" />
-          Per-Wallet Settings
-        </SheetTitle>
-        <SheetDescription>
-          <span className="font-medium text-foreground">
-            {creator.label || "Unnamed"}
-          </span>{" "}
-          —{" "}
-          <span className="font-mono text-xs">{formatAddress(creator.address)}</span>
-          <br />
-          Leave fields empty to use the global configuration.
+        <SheetTitle className="text-white font-bold">Per-Wallet Settings</SheetTitle>
+        <SheetDescription className="text-white/40 text-sm">
+          Overrides for <span className="font-mono text-violet-300/70">{formatAddress(creator.address)}</span>
         </SheetDescription>
       </SheetHeader>
 
-      <div className="space-y-6">
-        {/* Execution overrides */}
+      <div className="space-y-4">
         <div>
-          <p className="text-sm font-semibold mb-3">Execution Overrides</p>
-          <div className="space-y-4">
-            <div className="space-y-1.5">
-              <label className="text-sm font-medium">Buy Amount (ETH)</label>
-              <div className="relative">
-                <Input
-                  placeholder="e.g. 0.005  (empty = global)"
-                  value={buyAmount}
-                  onChange={(e) => setBuyAmount(e.target.value)}
-                  className="font-mono bg-background pr-10"
-                />
-                {buyAmount && (
-                  <Globe className="absolute right-3 top-1/2 -translate-y-1/2 h-3.5 w-3.5 text-blue-400" />
-                )}
-              </div>
-            </div>
-
-            <div className="space-y-1.5">
-              <label className="text-sm font-medium">Max Slippage (%)</label>
-              <Input
-                type="number"
-                step="0.1"
-                placeholder="e.g. 3  (empty = global)"
-                value={slippage}
-                onChange={(e) => setSlippage(e.target.value)}
-                className="font-mono bg-background"
-              />
-            </div>
-
-            <div className="space-y-1.5">
-              <label className="text-sm font-medium">Max Gas Price (Gwei)</label>
-              <Input
-                type="number"
-                placeholder="e.g. 30  (empty = global)"
-                value={maxGas}
-                onChange={(e) => setMaxGas(e.target.value)}
-                className="font-mono bg-background"
-              />
-            </div>
-
-            <div className="space-y-1.5">
-              <label className="text-sm font-medium">Max Buys Per Day</label>
-              <Input
-                type="number"
-                min="1"
-                step="1"
-                placeholder="e.g. 3  (empty = global)"
-                value={maxBuysPerDay}
-                onChange={(e) => setMaxBuysPerDay(e.target.value)}
-                className="font-mono bg-background"
-              />
-              <p className="text-xs text-muted-foreground">
-                Stop sniping this wallet once this many buys are recorded today.
-              </p>
-            </div>
-          </div>
+          <label className="text-white/50 text-xs font-semibold uppercase tracking-wider mb-2 block">Buy Amount (ETH)</label>
+          <Input
+            value={buyAmount}
+            onChange={(e) => setBuyAmount(e.target.value)}
+            placeholder="Use global default"
+            className={inputClass}
+          />
         </div>
-
-        <Separator />
-
-        {/* Risk management overrides */}
         <div>
-          <p className="text-sm font-semibold mb-3">Risk Management</p>
-          <div className="space-y-4">
-            <div className="space-y-1.5">
-              <label className="text-sm font-medium">Auto-Sell</label>
-              <Select
-                value={autoSellMode}
-                onValueChange={(v) => setAutoSellMode(v as "global" | "on" | "off")}
-              >
-                <SelectTrigger className="bg-background">
-                  <SelectValue />
-                </SelectTrigger>
-                <SelectContent>
-                  <SelectItem value="global">Use Global Setting</SelectItem>
-                  <SelectItem value="on">Enabled for this wallet</SelectItem>
-                  <SelectItem value="off">Disabled for this wallet</SelectItem>
-                </SelectContent>
-              </Select>
-            </div>
-
-            {autoSellMode === "on" && (
-              <div className="grid grid-cols-2 gap-3 pl-3 border-l-2 border-muted">
-                <div className="space-y-1.5">
-                  <label className="text-sm font-medium">Take Profit (%)</label>
-                  <Input
-                    type="number"
-                    placeholder="Optional"
-                    value={takeProfit}
-                    onChange={(e) => setTakeProfit(e.target.value)}
-                    className="font-mono bg-background text-green-600 font-bold"
-                  />
-                </div>
-                <div className="space-y-1.5">
-                  <label className="text-sm font-medium">Stop Loss (%)</label>
-                  <Input
-                    type="number"
-                    placeholder="Optional"
-                    value={stopLoss}
-                    onChange={(e) => setStopLoss(e.target.value)}
-                    className="font-mono bg-background text-red-600 font-bold"
-                  />
-                </div>
-              </div>
-            )}
-          </div>
+          <label className="text-white/50 text-xs font-semibold uppercase tracking-wider mb-2 block">Slippage (%)</label>
+          <Input
+            value={slippage}
+            onChange={(e) => setSlippage(e.target.value)}
+            type="number"
+            placeholder="Use global default"
+            className={inputClass}
+          />
+        </div>
+        <div>
+          <label className="text-white/50 text-xs font-semibold uppercase tracking-wider mb-2 block">Max Gas (Gwei)</label>
+          <Input
+            value={maxGas}
+            onChange={(e) => setMaxGas(e.target.value)}
+            type="number"
+            placeholder="Use global default"
+            className={inputClass}
+          />
         </div>
 
-        <Separator />
+        <Separator className="border-white/8" />
 
-        <div className="flex gap-3 pt-2">
-          <Button
-            variant="outline"
-            size="sm"
-            onClick={handleReset}
-            className="flex-none"
-          >
-            Reset to Global
-          </Button>
-          <Button
-            className="flex-1"
-            onClick={handleSave}
-            disabled={updateCreator.isPending}
-          >
-            {updateCreator.isPending ? "Saving..." : "Save Settings"}
-          </Button>
-        </div>
+        <button
+          onClick={handleSave}
+          disabled={updateCreator.isPending}
+          className="w-full h-11 rounded-2xl bg-gradient-to-r from-violet-600 to-violet-500 hover:from-violet-500 hover:to-violet-400 text-white font-bold text-sm transition-all shadow-lg shadow-violet-500/20 flex items-center justify-center gap-2 active:scale-[0.98] disabled:opacity-50"
+        >
+          <Check className="w-4 h-4" />
+          {updateCreator.isPending ? "Saving..." : "Save Changes"}
+        </button>
       </div>
     </SheetContent>
   );
 }
 
-// ── Main Creators page ─────────────────────────────────────────────────────
+// ── Main page ────────────────────────────────────────────────────────────────
 
 export default function Creators() {
   const { data: creators = [], isLoading } = useListCreators();
@@ -274,203 +131,181 @@ export default function Creators() {
   const [newLabel, setNewLabel] = useState("");
   const [settingsTarget, setSettingsTarget] = useState<Creator | null>(null);
 
-  const handleAdd = (e: React.FormEvent) => {
-    e.preventDefault();
-    if (!newAddress || !newAddress.startsWith("0x") || newAddress.length !== 42) {
-      toast({ variant: "destructive", title: "Invalid Address", description: "Must be a valid Ethereum address." });
-      return;
-    }
-    
+  const handleAdd = () => {
+    if (!newAddress.trim()) return;
     addCreator.mutate(
-      { data: { address: newAddress.toLowerCase(), label: newLabel } },
+      { data: { address: newAddress.trim(), label: newLabel.trim() || undefined } },
       {
         onSuccess: () => {
+          queryClient.invalidateQueries({ queryKey: getListCreatorsQueryKey() });
           setNewAddress("");
           setNewLabel("");
-          toast({ title: "Creator Added", description: "Successfully added to watchlist." });
-          queryClient.invalidateQueries({ queryKey: getListCreatorsQueryKey() });
+          toast({ title: "Creator added", description: "Now watching this wallet." });
         },
         onError: () => toast({ variant: "destructive", title: "Error", description: "Failed to add creator." })
       }
     );
   };
 
-  const handleToggle = (address: string, enabled: boolean) => {
-    updateCreator.mutate(
-      { address, data: { enabled } },
-      {
-        onSuccess: () => {
-          queryClient.invalidateQueries({ queryKey: getListCreatorsQueryKey() });
-        },
-        onError: () => toast({ variant: "destructive", title: "Error", description: "Failed to update status." })
-      }
-    );
-  };
-
   const handleRemove = (address: string) => {
-    if (!confirm("Are you sure you want to remove this creator?")) return;
-    
     removeCreator.mutate(
       { address },
       {
         onSuccess: () => {
-          toast({ title: "Creator Removed", description: "Removed from watchlist." });
           queryClient.invalidateQueries({ queryKey: getListCreatorsQueryKey() });
+          toast({ title: "Creator removed" });
         },
-        onError: () => toast({ variant: "destructive", title: "Error", description: "Failed to remove creator." })
+        onError: () => toast({ variant: "destructive", title: "Error", description: "Failed to remove." })
       }
     );
   };
 
-  /** Returns true if the creator has any per-wallet overrides configured */
-  const hasCustomSettings = (c: Creator) =>
-    c.buyAmountEth != null ||
-    c.slippagePercent != null ||
-    c.maxGasGwei != null ||
-    c.autoSell != null ||
-    c.maxBuysPerDay != null;
+  const handleToggle = (c: Creator) => {
+    updateCreator.mutate(
+      { address: c.address, data: { enabled: !c.enabled } },
+      {
+        onSuccess: () => queryClient.invalidateQueries({ queryKey: getListCreatorsQueryKey() }),
+        onError: () => toast({ variant: "destructive", title: "Error", description: "Failed to update." })
+      }
+    );
+  };
+
+  const inputClass = "bg-white/[0.07] border border-white/15 rounded-xl text-white placeholder-white/20 text-sm focus:ring-violet-500/40 focus:border-violet-400/50 h-11";
 
   return (
-    <div className="p-8 space-y-8 max-w-5xl mx-auto">
+    <div className="p-4 space-y-4 pb-8">
+
+      {/* ── Header ── */}
       <div>
-        <h1 className="text-3xl font-bold tracking-tight">Creator Whitelist</h1>
-        <p className="text-muted-foreground mt-2">
-          Manage wallet addresses to snipe. Each wallet can override global sniper settings individually.
-        </p>
+        <h2 className="text-white font-bold text-lg">Watched Creators</h2>
+        <p className="text-white/30 text-xs mt-0.5">Wallets to snipe tokens from</p>
       </div>
 
-      <Card className="border-border">
-        <CardHeader className="bg-muted/30 border-b">
-          <CardTitle className="text-lg flex items-center gap-2">
-            <UserPlus className="h-5 w-5" /> Add New Target
-          </CardTitle>
-        </CardHeader>
-        <CardContent className="p-6">
-          <form onSubmit={handleAdd} className="flex gap-4 items-end">
-            <div className="flex-1 space-y-2">
-              <label className="text-sm font-medium">Wallet Address (0x...)</label>
-              <Input 
-                placeholder="0x1234..." 
-                value={newAddress} 
-                onChange={(e) => setNewAddress(e.target.value)} 
-                className="font-mono bg-background"
-                required
-              />
-            </div>
-            <div className="flex-1 space-y-2">
-              <label className="text-sm font-medium">Label / Name</label>
-              <Input 
-                placeholder="e.g. Zora Power User" 
-                value={newLabel} 
-                onChange={(e) => setNewLabel(e.target.value)} 
-                className="bg-background"
-              />
-            </div>
-            <Button type="submit" disabled={addCreator.isPending} className="w-32">
-              {addCreator.isPending ? "Adding..." : "Add to List"}
-            </Button>
-          </form>
-        </CardContent>
-      </Card>
+      {/* ── Add creator card ── */}
+      <div className="rounded-2xl border border-white/8 bg-white/[0.04] p-4 space-y-3">
+        <p className="text-white/50 text-xs font-semibold uppercase tracking-wider">Add Creator</p>
+        <Input
+          value={newAddress}
+          onChange={(e) => setNewAddress(e.target.value)}
+          placeholder="Wallet address (0x...)"
+          className={inputClass}
+          onKeyDown={(e) => e.key === "Enter" && handleAdd()}
+        />
+        <Input
+          value={newLabel}
+          onChange={(e) => setNewLabel(e.target.value)}
+          placeholder="Label (optional)"
+          className={inputClass}
+          onKeyDown={(e) => e.key === "Enter" && handleAdd()}
+        />
+        <button
+          onClick={handleAdd}
+          disabled={!newAddress.trim() || addCreator.isPending}
+          className="w-full h-11 rounded-2xl bg-gradient-to-r from-violet-600 to-violet-500 hover:from-violet-500 hover:to-violet-400 text-white font-bold text-sm transition-all shadow-lg shadow-violet-500/20 flex items-center justify-center gap-2 active:scale-[0.98] disabled:bg-white/[0.06] disabled:text-white/20 disabled:shadow-none disabled:cursor-not-allowed"
+        >
+          <UserPlus className="w-4 h-4" />
+          {addCreator.isPending ? "Adding..." : "Add Creator"}
+        </button>
+      </div>
 
-      <Card>
-        <div className="rounded-md border">
-          <Table>
-            <TableHeader className="bg-muted/20">
-              <TableRow>
-                <TableHead>Target</TableHead>
-                <TableHead>Address</TableHead>
-                <TableHead className="text-right">Snipes</TableHead>
-                <TableHead className="text-center">Daily Limit</TableHead>
-                <TableHead className="text-center">Status</TableHead>
-                <TableHead className="text-right">Actions</TableHead>
-              </TableRow>
-            </TableHeader>
-            <TableBody>
-              {isLoading ? (
-                <TableRow>
-                  <TableCell colSpan={6} className="text-center h-24 text-muted-foreground">Loading targets...</TableCell>
-                </TableRow>
-              ) : creators.length === 0 ? (
-                <TableRow>
-                  <TableCell colSpan={6} className="text-center h-32 text-muted-foreground">
-                    No creators in watchlist. Add one above.
-                  </TableCell>
-                </TableRow>
-              ) : (
-                creators.map((c) => (
-                  <TableRow key={c.address}>
-                    <TableCell className="font-medium">
-                      <div className="flex items-center gap-2">
-                        {c.label || <span className="text-muted-foreground italic">Unnamed</span>}
-                        {hasCustomSettings(c) && (
-                          <Badge variant="outline" className="text-[10px] px-1.5 py-0 border-blue-500/50 text-blue-400">
-                            custom
-                          </Badge>
-                        )}
-                      </div>
-                    </TableCell>
-                    <TableCell>
-                      <div className="flex items-center gap-2">
-                        <span className="font-mono text-sm">{formatAddress(c.address)}</span>
-                        <a href={getBasescanAddressLink(c.address)} target="_blank" rel="noreferrer" className="text-muted-foreground hover:text-foreground">
-                          <ExternalLink className="h-3 w-3" />
-                        </a>
-                      </div>
-                    </TableCell>
-                    <TableCell className="text-right font-mono">{c.totalSniped}</TableCell>
-                    <TableCell className="text-center">
-                      {c.maxBuysPerDay != null ? (
-                        <Badge variant="outline" className="font-mono text-xs">
-                          {c.maxBuysPerDay}/day
-                        </Badge>
-                      ) : (
-                        <span className="text-xs text-muted-foreground">global</span>
-                      )}
-                    </TableCell>
-                    <TableCell className="text-center">
-                      <div className="flex items-center justify-center gap-2">
-                        <Switch 
-                          checked={c.enabled} 
-                          onCheckedChange={(checked) => handleToggle(c.address, checked)}
-                          disabled={updateCreator.isPending}
-                        />
-                        {c.enabled ? (
-                          <Badge variant="success" className="text-[10px] w-14 justify-center">ACTIVE</Badge>
-                        ) : (
-                          <Badge variant="secondary" className="text-[10px] w-14 justify-center">PAUSED</Badge>
-                        )}
-                      </div>
-                    </TableCell>
-                    <TableCell className="text-right">
-                      <div className="flex items-center justify-end gap-1">
-                        <Button
-                          variant="ghost"
-                          size="icon"
-                          className="h-8 w-8 text-muted-foreground hover:text-blue-500 hover:bg-blue-500/10"
-                          onClick={() => setSettingsTarget(c)}
-                          title="Per-wallet settings"
-                        >
-                          <SlidersHorizontal className="h-4 w-4" />
-                        </Button>
-                        <Button 
-                          variant="ghost" 
-                          size="icon" 
-                          className="h-8 w-8 text-muted-foreground hover:text-destructive hover:bg-destructive/10"
-                          onClick={() => handleRemove(c.address)}
-                          disabled={removeCreator.isPending}
-                        >
-                          <Trash2 className="h-4 w-4" />
-                        </Button>
-                      </div>
-                    </TableCell>
-                  </TableRow>
-                ))
-              )}
-            </TableBody>
-          </Table>
+      {/* ── Creator cards ── */}
+      {isLoading ? (
+        <div className="space-y-2">
+          {Array.from({ length: 3 }).map((_, i) => (
+            <div key={i} className="rounded-2xl border border-white/8 bg-white/[0.04] h-20 animate-pulse" />
+          ))}
         </div>
-      </Card>
+      ) : creators.length === 0 ? (
+        <div className="rounded-2xl border border-white/8 bg-white/[0.03] py-16 flex flex-col items-center gap-3">
+          <Users className="w-10 h-10 text-white/10" />
+          <p className="text-white/25 text-sm">No creators added yet</p>
+        </div>
+      ) : (
+        <div className="space-y-2">
+          {creators.map((c) => (
+            <div key={c.id} className={cn(
+              "rounded-2xl border bg-white/[0.04] overflow-hidden hover:border-white/12 transition-all",
+              c.enabled ? "border-white/8" : "border-white/5 opacity-60"
+            )}>
+              <div className="flex items-center gap-3 px-4 py-3.5">
+                {/* Avatar */}
+                <div className="w-10 h-10 rounded-xl bg-gradient-to-br from-violet-600 to-indigo-700 flex items-center justify-center shrink-0 shadow-md shadow-violet-500/20">
+                  <span className="text-white font-bold text-xs">
+                    {(c.label ?? c.address).slice(0, 2).toUpperCase()}
+                  </span>
+                </div>
+
+                {/* Info */}
+                <div className="flex-1 min-w-0">
+                  <div className="flex items-center gap-2">
+                    <p className="text-white font-semibold text-sm truncate">
+                      {c.label ?? formatAddress(c.address)}
+                    </p>
+                    <span className={cn(
+                      "text-[10px] font-bold px-2 py-0.5 rounded-full border shrink-0",
+                      c.enabled
+                        ? "bg-green-500/10 border-green-500/20 text-green-400"
+                        : "bg-white/5 border-white/10 text-white/30"
+                    )}>
+                      {c.enabled ? "ACTIVE" : "PAUSED"}
+                    </span>
+                  </div>
+                  <div className="flex items-center gap-2 mt-0.5">
+                    <span className="text-white/30 text-[11px] font-mono">{formatAddress(c.address)}</span>
+                    {c.buyAmountEth && (
+                      <>
+                        <span className="text-white/15">·</span>
+                        <span className="text-violet-300/50 text-[11px] font-mono">{c.buyAmountEth} ETH</span>
+                      </>
+                    )}
+                  </div>
+                </div>
+
+                {/* Controls */}
+                <div className="flex items-center gap-2 shrink-0">
+                  <Switch
+                    checked={c.enabled}
+                    onCheckedChange={() => handleToggle(c)}
+                    className="data-[state=checked]:bg-violet-600"
+                  />
+                </div>
+              </div>
+
+              {/* Action row */}
+              <div className="flex items-center gap-2 px-4 py-2.5 border-t border-white/5 bg-black/20">
+                <a
+                  href={getBasescanAddressLink(c.address)}
+                  target="_blank"
+                  rel="noreferrer"
+                  className="flex items-center gap-1.5 text-white/30 hover:text-violet-300 text-[11px] font-mono transition-colors"
+                >
+                  <Globe className="w-3 h-3" />
+                  Basescan
+                </a>
+
+                <div className="flex-1" />
+
+                <button
+                  onClick={() => setSettingsTarget(c)}
+                  className="w-7 h-7 rounded-lg border border-white/10 bg-white/5 hover:bg-violet-500/10 hover:border-violet-500/20 flex items-center justify-center text-white/30 hover:text-violet-400 transition-all"
+                  title="Per-wallet settings"
+                >
+                  <SlidersHorizontal className="w-3.5 h-3.5" />
+                </button>
+
+                <button
+                  onClick={() => handleRemove(c.address)}
+                  disabled={removeCreator.isPending}
+                  className="w-7 h-7 rounded-lg border border-white/10 bg-white/5 hover:bg-red-500/10 hover:border-red-500/20 flex items-center justify-center text-white/30 hover:text-red-400 transition-all disabled:opacity-30"
+                  title="Remove creator"
+                >
+                  <Trash2 className="w-3.5 h-3.5" />
+                </button>
+              </div>
+            </div>
+          ))}
+        </div>
+      )}
 
       {/* Per-wallet settings sheet */}
       <Sheet open={!!settingsTarget} onOpenChange={(open) => { if (!open) setSettingsTarget(null); }}>
