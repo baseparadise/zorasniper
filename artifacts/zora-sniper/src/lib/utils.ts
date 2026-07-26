@@ -26,6 +26,11 @@ export function getBasescanAddressLink(address: string) {
   return `https://basescan.org/address/${address}`;
 }
 
+/** Link to the token's page on Zora (Base network). */
+export function getZoraTokenLink(tokenAddress: string) {
+  return `https://zora.co/coin/base:${tokenAddress}`;
+}
+
 export function formatUptime(seconds: number): string {
   const h = Math.floor(seconds / 3600);
   const m = Math.floor((seconds % 3600) / 60);
