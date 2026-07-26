@@ -14,4 +14,5 @@ export const ListTradesStatus = {
   confirmed: 'confirmed',
   failed: 'failed',
   sold: 'sold',
+  skipped: 'skipped',
 } as const;
