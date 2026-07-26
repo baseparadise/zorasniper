@@ -7,7 +7,10 @@ import { Table, TableBody, TableCell, TableHead, TableHeader, TableRow } from "@
 import { Badge } from "@/components/ui/badge";
 import { Select, SelectContent, SelectItem, SelectTrigger, SelectValue } from "@/components/ui/select";
 import { Tooltip, TooltipContent, TooltipProvider, TooltipTrigger } from "@/components/ui/tooltip";
-import { ExternalLink, ChevronLeft, ChevronRight, Hash, Copy, Check } from "lucide-react";
+import { ChevronLeft, ChevronRight, Copy, Check } from "lucide-react";
+
+const ZORA_LOGO = `${import.meta.env.BASE_URL}zora-logo.png`;
+const BASESCAN_LOGO = `${import.meta.env.BASE_URL}basescan-logo.png`;
 
 type TradeStatusFilter = "all" | "pending" | "confirmed" | "failed" | "sold";
 
@@ -210,13 +213,13 @@ export default function Trades() {
                                 href={getBasescanTxLink(trade.txHash)}
                                 target="_blank"
                                 rel="noreferrer"
-                                className="text-blue-500 hover:text-blue-700 transition-colors"
+                                className="opacity-90 hover:opacity-100 transition-opacity"
                               >
-                                <ExternalLink className="h-4 w-4" />
+                                <img src={BASESCAN_LOGO} alt="Basescan" className="h-4 w-4 rounded-full object-cover" />
                               </a>
                             ) : (
-                              <span className="w-4 text-muted-foreground/30">
-                                <ExternalLink className="h-4 w-4" />
+                              <span className="opacity-20">
+                                <img src={BASESCAN_LOGO} alt="Basescan" className="h-4 w-4 rounded-full object-cover" />
                               </span>
                             )}
                           </TooltipTrigger>
@@ -235,13 +238,13 @@ export default function Trades() {
                                 href={getBasescanTxLink(trade.sellTxHash)}
                                 target="_blank"
                                 rel="noreferrer"
-                                className="text-orange-500 hover:text-orange-700 transition-colors"
+                                className="opacity-90 hover:opacity-100 transition-opacity"
                               >
-                                <Hash className="h-4 w-4" />
+                                <img src={BASESCAN_LOGO} alt="Basescan" className="h-4 w-4 rounded-full object-cover opacity-60" />
                               </a>
                             ) : (
-                              <span className="w-4 text-muted-foreground/30">
-                                <Hash className="h-4 w-4" />
+                              <span className="opacity-20">
+                                <img src={BASESCAN_LOGO} alt="Basescan" className="h-4 w-4 rounded-full object-cover" />
                               </span>
                             )}
                           </TooltipTrigger>
@@ -259,18 +262,9 @@ export default function Trades() {
                               href={getZoraTokenLink(trade.tokenAddress)}
                               target="_blank"
                               rel="noreferrer"
-                              className="text-purple-500 hover:text-purple-700 transition-colors"
+                              className="opacity-90 hover:opacity-100 transition-opacity"
                             >
-                              {/* Zora "Z" icon as SVG */}
-                              <svg
-                                width="16"
-                                height="16"
-                                viewBox="0 0 24 24"
-                                fill="currentColor"
-                                xmlns="http://www.w3.org/2000/svg"
-                              >
-                                <path d="M3 4h18v2.5L8.5 18H21v2H3v-2.5L14.5 6H3V4z" />
-                              </svg>
+                              <img src={ZORA_LOGO} alt="Zora" className="h-4 w-4 rounded-full object-cover" />
                             </a>
                           </TooltipTrigger>
                           <TooltipContent side="top" className="text-xs">
@@ -287,25 +281,9 @@ export default function Trades() {
                               href={getBasescanAddressLink(trade.tokenAddress)}
                               target="_blank"
                               rel="noreferrer"
-                              className="text-sky-500 hover:text-sky-700 transition-colors"
+                              className="opacity-90 hover:opacity-100 transition-opacity"
                             >
-                              {/* Contract / block icon */}
-                              <svg
-                                width="16"
-                                height="16"
-                                viewBox="0 0 24 24"
-                                fill="none"
-                                stroke="currentColor"
-                                strokeWidth="2"
-                                strokeLinecap="round"
-                                strokeLinejoin="round"
-                                xmlns="http://www.w3.org/2000/svg"
-                              >
-                                <rect x="3" y="3" width="7" height="7" />
-                                <rect x="14" y="3" width="7" height="7" />
-                                <rect x="3" y="14" width="7" height="7" />
-                                <path d="M14 17h3m0 0h3m-3 0v-3m0 3v3" />
-                              </svg>
+                              <img src={BASESCAN_LOGO} alt="Basescan" className="h-4 w-4 rounded-full object-cover opacity-80" />
                             </a>
                           </TooltipTrigger>
                           <TooltipContent side="top" className="text-xs">
