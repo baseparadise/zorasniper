@@ -217,13 +217,6 @@ async function handleCoinCreated(params: {
 
   const config = await loadConfig();
 
-  // Bot is globally disabled — record detection but skip buy
-  if (!config.enabled) {
-    logger.info({ creatorAddr }, "Bot is disabled, skipping buy");
-    await recordSkipped(coin, name, symbol, creatorAddr, "Bot is disabled");
-    return;
-  }
-
   let shouldSnipe = false;
   let creatorRow: typeof creatorsTable.$inferSelect | null = null;
 
@@ -241,8 +234,17 @@ async function handleCoinCreated(params: {
   }
 
   if (!shouldSnipe) {
+    // Creator not in whitelist — silently ignore, no DB record needed.
+    // (already logged at debug level above)
     logger.debug({ creatorAddr }, "Creator not in whitelist, skipping");
-    await recordSkipped(coin, name, symbol, creatorAddr, "Creator not in whitelist");
+    return;
+  }
+
+  // Bot is globally disabled — creator IS whitelisted but buy is paused.
+  // Record this so the user can see detections even when the bot is off.
+  if (!config.enabled) {
+    logger.info({ creatorAddr }, "Bot is disabled, skipping buy");
+    await recordSkipped(coin, name, symbol, creatorAddr, "Bot is disabled");
     return;
   }
 
