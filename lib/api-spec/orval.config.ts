@@ -61,7 +61,7 @@ export default defineConfig({
             query: ['boolean', 'number', 'string'],
             param: ['boolean', 'number', 'string'],
             body: ['bigint', 'date'],
-            response: ['bigint', 'date'],
+            response: ['bigint', 'date', 'number'],
           },
         },
         useDates: true,
