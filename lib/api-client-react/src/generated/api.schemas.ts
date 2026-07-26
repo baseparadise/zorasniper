@@ -144,6 +144,8 @@ export interface Trade {
   timestamp: string;
   status: TradeStatus;
   /** @nullable */
+  failReason?: string | null;
+  /** @nullable */
   sellTxHash?: string | null;
   /** @nullable */
   sellAmountEth?: string | null;
@@ -160,6 +162,7 @@ export const TradeStatus = {
   confirmed: 'confirmed',
   failed: 'failed',
   sold: 'sold',
+  skipped: 'skipped',
 } as const;
 
 export type ListTradesParams = {
@@ -175,6 +178,7 @@ export const ListTradesStatus = {
   confirmed: 'confirmed',
   failed: 'failed',
   sold: 'sold',
+  skipped: 'skipped',
 } as const;
 
 export interface TradeStats {
