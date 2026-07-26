@@ -1,4 +1,4 @@
-import express, { type Express } from "express";
+import express, { type Express, type Request, type Response, type NextFunction } from "express";
 import cors from "cors";
 import pinoHttp from "pino-http";
 import { join } from "path";
@@ -45,5 +45,15 @@ if (existsSync(frontendDist)) {
 } else {
   logger.warn({ frontendDist }, "Frontend dist not found — skipping static file serving");
 }
+
+// JSON error handler — returns actual error details instead of blank HTML page.
+// Must be defined after all routes and static middleware.
+app.use((err: Error, _req: Request, res: Response, _next: NextFunction) => {
+  logger.error({ err }, "Unhandled request error");
+  res.status(500).json({
+    error: err.message ?? "Internal Server Error",
+    ...(process.env.NODE_ENV !== "production" && { stack: err.stack }),
+  });
+});
 
 export default app;

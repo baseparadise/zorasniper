@@ -68,6 +68,15 @@ async function applyMigrations(): Promise<void> {
       name: "002_trades_fail_reason",
       sql: `ALTER TABLE trades ADD COLUMN IF NOT EXISTS fail_reason TEXT`,
     },
+    {
+      // Added zora_profile_url column to creators table.
+      // Bug: this column was in the TypeScript schema from the start but was
+      // never included in any migration. Drizzle generates explicit column
+      // names in SELECT and UPDATE RETURNING, so every read/update on the
+      // creators table was failing with "column does not exist".
+      name: "003_creators_zora_profile_url",
+      sql: `ALTER TABLE creators ADD COLUMN IF NOT EXISTS zora_profile_url TEXT`,
+    },
   ];
 
   let ran = 0;
