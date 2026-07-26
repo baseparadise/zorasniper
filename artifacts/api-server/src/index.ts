@@ -33,6 +33,10 @@ async function applyMigrations(): Promise<void> {
       ADD COLUMN IF NOT EXISTS stop_loss_percent    TEXT,
       ADD COLUMN IF NOT EXISTS max_buys_per_day     INTEGER;
   `);
+  await pool.query(`
+    ALTER TABLE trades
+      ADD COLUMN IF NOT EXISTS fail_reason TEXT;
+  `);
   logger.info("DB migrations applied");
 }
 
