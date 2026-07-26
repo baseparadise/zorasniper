@@ -35,7 +35,7 @@ function getDb(): ReturnType<typeof drizzle<typeof schema>> {
 export const db = new Proxy({} as ReturnType<typeof drizzle<typeof schema>>, {
   get(_target, prop) {
     const instance = getDb();
-    const val = (instance as Record<string | symbol, unknown>)[prop];
+    const val = (instance as unknown as Record<string | symbol, unknown>)[prop];
     return typeof val === "function" ? val.bind(instance) : val;
   },
 });
@@ -43,7 +43,7 @@ export const db = new Proxy({} as ReturnType<typeof drizzle<typeof schema>>, {
 export const pool = new Proxy({} as pg.Pool, {
   get(_target, prop) {
     const instance = getPool();
-    const val = (instance as Record<string | symbol, unknown>)[prop];
+    const val = (instance as unknown as Record<string | symbol, unknown>)[prop];
     return typeof val === "function" ? val.bind(instance) : val;
   },
 });
