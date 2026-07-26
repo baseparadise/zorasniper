@@ -12,7 +12,7 @@ import { loadConfig } from "../lib/config";
 // Configure via env ZORA_FACTORY_ADDRESS to override
 const ZORA_FACTORY_ADDRESS =
   (process.env.ZORA_FACTORY_ADDRESS as Address | undefined) ??
-  "0x777777722D078c97c6ad07d9f36801e653E356B9";
+  "0x777777751622c0d3258f214f9df38e35bf45baf3";
 
 const ZORA_COIN_FACTORY_ABI = [
   {
