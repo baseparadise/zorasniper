@@ -23,6 +23,8 @@ export interface Trade {
   timestamp: Date;
   status: TradeStatus;
   /** @nullable */
+  failReason?: string | null;
+  /** @nullable */
   sellTxHash?: string | null;
   /** @nullable */
   sellAmountEth?: string | null;
