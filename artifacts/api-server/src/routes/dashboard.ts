@@ -40,9 +40,23 @@ router.get("/dashboard", async (_req, res): Promise<void> => {
     .from(tradesTable)
     .where(eq(tradesTable.status, "sold"));
 
+  // Bug #4 fix: lossCount = trades that were sold at a financial loss (pnl_eth < 0),
+  // NOT failed trades. A failed trade is a technical failure; a loss is a bad trade
+  // that completed but returned less ETH than spent.
+  const [lossRow] = await db
+    .select({ total: count() })
+    .from(tradesTable)
+    .where(
+      and(
+        eq(tradesTable.status, "sold"),
+        sql`NULLIF(pnl_eth, '')::numeric < 0`
+      )
+    );
+
   const totalTrades = totalRow?.total ?? 0;
   const winCount = soldRow?.total ?? 0;
   const failedTrades = failedRow?.total ?? 0;
+  const lossCount = lossRow?.total ?? 0;
 
   // Today — proper date filter, exclude skipped
   const today = new Date();
@@ -96,7 +110,7 @@ router.get("/dashboard", async (_req, res): Promise<void> => {
     totalEthRecovered: ethRecoveredRow?.total ?? "0",
     totalPnlEth: pnlRow?.total ?? "0",
     winCount,
-    lossCount: failedTrades,
+    lossCount,
     winRatePercent: totalTrades > 0 ? (winCount / totalTrades) * 100 : 0,
     avgBuyAmountEth: avgRow?.avg ?? "0",
     todayTrades: todayRow?.total ?? 0,

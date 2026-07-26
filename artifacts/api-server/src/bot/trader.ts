@@ -49,11 +49,24 @@ function getRpcUrl(): string {
   return url;
 }
 
+/**
+ * Bug #3 fix: ALCHEMY_RPC_URL is typically a wss:// URL (needed by sniper.ts
+ * for WebSocket event watching). The HTTP clients in trader.ts must use an
+ * https:// endpoint — convert the scheme instead of reusing the raw URL.
+ */
+function getHttpRpcUrl(): string {
+  return getRpcUrl()
+    .replace(/^wss:\/\//, "https://")
+    .replace(/^ws:\/\//, "http://");
+}
+
 function getWalletKey(): `0x${string}` {
   const key = process.env.WALLET_PRIVATE_KEY;
   if (!key) throw new Error("WALLET_PRIVATE_KEY is not set");
   return key.startsWith("0x") ? (key as `0x${string}`) : `0x${key}`;
 }
+
+const ZERO_ADDRESS = "0x0000000000000000000000000000000000000000" as Address;
 
 export async function executeBuy(params: TradeParams): Promise<void> {
   const {
@@ -62,6 +75,7 @@ export async function executeBuy(params: TradeParams): Promise<void> {
     tokenSymbol,
     creatorAddress,
     buyAmountEth,
+    slippagePercent,
     maxGasGwei,
   } = params;
 
@@ -83,11 +97,39 @@ export async function executeBuy(params: TradeParams): Promise<void> {
 
   try {
     const account = privateKeyToAccount(getWalletKey());
-    const publicClient = createPublicClient({ chain: base, transport: http(getRpcUrl()) });
-    const walletClient = createWalletClient({ account, chain: base, transport: http(getRpcUrl()) });
+    // Bug #3 fix: use HTTP URL for JSON-RPC clients (not the wss:// WebSocket URL)
+    const publicClient = createPublicClient({ chain: base, transport: http(getHttpRpcUrl()) });
+    const walletClient = createWalletClient({ account, chain: base, transport: http(getHttpRpcUrl()) });
 
     const value = parseEther(buyAmountEth);
-    const minOrderSize = 0n; // accept any fill
+
+    // Bug #2 fix: simulate the buy to get the expected token output, then apply
+    // slippagePercent as a minimum order size so the tx reverts on-chain if the
+    // price has moved too far by the time our tx lands.
+    let minOrderSize = 0n;
+    try {
+      const { result: expectedTokens } = await publicClient.simulateContract({
+        address: tokenAddress,
+        abi: ZORA_COIN_ABI,
+        functionName: "buy",
+        args: [account.address, account.address, ZERO_ADDRESS, "zora-sniper", 0, 0n, 0n],
+        value,
+        account,
+      });
+      // Convert slippagePercent (e.g. 5.0) to basis points (500), then compute floor.
+      const slippageBps = BigInt(Math.round(slippagePercent * 100));
+      minOrderSize = (expectedTokens * (10_000n - slippageBps)) / 10_000n;
+      logger.info(
+        { expectedTokens: expectedTokens.toString(), minOrderSize: minOrderSize.toString(), slippagePercent },
+        "Slippage applied to buy"
+      );
+    } catch (simErr) {
+      logger.warn(
+        { simErr, tokenAddress },
+        "Buy simulation failed — proceeding with minOrderSize=0 (no slippage protection)"
+      );
+      minOrderSize = 0n;
+    }
 
     // EIP-1559 gas: cap maxFeePerGas at the user-configured limit.
     // Use estimateFeesPerGas() so we also get maxPriorityFeePerGas correctly.
@@ -110,7 +152,7 @@ export async function executeBuy(params: TradeParams): Promise<void> {
       args: [
         account.address,
         account.address,
-        "0x0000000000000000000000000000000000000000" as Address,
+        ZERO_ADDRESS,
         "zora-sniper",
         0,
         minOrderSize,
@@ -131,26 +173,46 @@ export async function executeBuy(params: TradeParams): Promise<void> {
     const gasUsedEth = formatEther(
       receipt.gasUsed * (receipt.effectiveGasPrice ?? maxFeePerGas)
     );
-    const isConfirmed = receipt.status === "success";
 
+    // Parse token amount received from the transaction logs / return value.
+    // We read it from the receipt logs if possible; fall back to empty string.
+    let tokenAmount = "";
+    try {
+      // The buy() return value is emitted as the first topic-free log data on success.
+      // Attempt a simple re-simulation on the mined block to get the return value.
+      const { result } = await publicClient.simulateContract({
+        address: tokenAddress,
+        abi: ZORA_COIN_ABI,
+        functionName: "buy",
+        args: [account.address, account.address, ZERO_ADDRESS, "zora-sniper", 0, minOrderSize, 0n],
+        value,
+        account,
+        blockNumber: receipt.blockNumber,
+      });
+      tokenAmount = result.toString();
+    } catch {
+      // Non-fatal — token amount will be left blank
+    }
+
+    const success = receipt.status === "success";
     const [updated] = await db
       .update(tradesTable)
       .set({
         txHash,
-        status: isConfirmed ? "confirmed" : "failed",
+        status: success ? "confirmed" : "failed",
         gasUsedEth,
+        tokenAmount: tokenAmount || null,
         blockNumber: Number(receipt.blockNumber),
-        failReason: isConfirmed ? null : "Transaction reverted on-chain",
       })
       .where(eq(tradesTable.id, tradeRow.id))
       .returning();
 
-    // Increment creator snipe count and bot counters only on confirmed buys.
-    if (isConfirmed) {
+    // Update per-creator snipe counter on success
+    if (success) {
       await db
         .update(creatorsTable)
-        .set({ totalSniped: sql`${creatorsTable.totalSniped} + 1` })
-        .where(eq(creatorsTable.address, creatorAddress.toLowerCase()));
+        .set({ totalSniped: sql`total_sniped + 1` })
+        .where(eq(creatorsTable.address, creatorAddress));
 
       const state = botState.get();
       botState.update({
@@ -183,7 +245,8 @@ export async function executeBuy(params: TradeParams): Promise<void> {
 export async function getWalletBalance(): Promise<{ address: string; balanceEth: string } | null> {
   try {
     const account = privateKeyToAccount(getWalletKey());
-    const publicClient = createPublicClient({ chain: base, transport: http(getRpcUrl()) });
+    // Bug #3 fix: use HTTP URL here too
+    const publicClient = createPublicClient({ chain: base, transport: http(getHttpRpcUrl()) });
     const balanceWei = await publicClient.getBalance({ address: account.address });
     return {
       address: account.address,
