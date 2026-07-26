@@ -1,6 +1,6 @@
 import { Router, type IRouter } from "express";
 import { db, tradesTable, creatorsTable } from "@workspace/db";
-import { eq, count, desc, gte, and, sql } from "drizzle-orm";
+import { eq, count, desc, gte, and, ne, sql } from "drizzle-orm";
 import { botState } from "../bot/state";
 import { GetDashboardResponse } from "@workspace/api-zod";
 import { getWalletAddress } from "../bot/trader";
@@ -8,14 +8,17 @@ import { getWalletAddress } from "../bot/trader";
 const router: IRouter = Router();
 
 router.get("/dashboard", async (_req, res): Promise<void> => {
-  // Lazily populate wallet address from private key if not yet set
   if (!botState.get().walletAddress) {
     const addr = getWalletAddress();
     if (addr) botState.update({ walletAddress: addr });
   }
   const state = botState.get();
 
-  const [totalRow] = await db.select({ total: count() }).from(tradesTable);
+  // totalTrades excludes "skipped" — skipped = deploy detected but buy not attempted
+  const [totalRow] = await db
+    .select({ total: count() })
+    .from(tradesTable)
+    .where(ne(tradesTable.status, "skipped"));
   botState.update({ totalTrades: totalRow?.total ?? 0 });
 
   const recentTrades = await db
@@ -41,16 +44,16 @@ router.get("/dashboard", async (_req, res): Promise<void> => {
   const winCount = soldRow?.total ?? 0;
   const failedTrades = failedRow?.total ?? 0;
 
-  // Today's stats — correct date filter
+  // Today — proper date filter, exclude skipped
   const today = new Date();
   today.setHours(0, 0, 0, 0);
 
   const [todayRow] = await db
     .select({ total: count() })
     .from(tradesTable)
-    .where(gte(tradesTable.timestamp, today));
+    .where(and(gte(tradesTable.timestamp, today), ne(tradesTable.status, "skipped")));
 
-  // Real ETH stats via SQL aggregation
+  // Real ETH stats
   const [ethSpentRow] = await db
     .select({
       total: sql<string>`COALESCE(SUM(NULLIF(buy_amount_eth, '')::numeric), 0)::text`,
