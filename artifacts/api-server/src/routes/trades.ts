@@ -1,6 +1,6 @@
 import { Router, type IRouter } from "express";
 import { db, tradesTable } from "@workspace/db";
-import { eq, count, desc, gte, and, sql } from "drizzle-orm";
+import { eq, count, desc, gte, and, ne, sql } from "drizzle-orm";
 import {
   ListTradesQueryParams,
   ListTradesResponse,
@@ -36,7 +36,11 @@ router.get("/trades", async (req, res): Promise<void> => {
 });
 
 router.get("/trades/stats", async (_req, res): Promise<void> => {
-  const [allRow] = await db.select({ total: count() }).from(tradesTable);
+  // Exclude "skipped" from all trade counts — skipped = detected but not attempted
+  const [allRow] = await db
+    .select({ total: count() })
+    .from(tradesTable)
+    .where(ne(tradesTable.status, "skipped"));
   const [confirmedRow] = await db
     .select({ total: count() })
     .from(tradesTable)
@@ -57,17 +61,17 @@ router.get("/trades/stats", async (_req, res): Promise<void> => {
   const winCount = soldTrades;
   const lossCount = failedTrades;
 
-  // Today's stats — use a proper date filter
+  // Today's stats — proper date filter, exclude skipped
   const today = new Date();
   today.setHours(0, 0, 0, 0);
 
   const [todayRow] = await db
     .select({ total: count() })
     .from(tradesTable)
-    .where(gte(tradesTable.timestamp, today));
+    .where(and(gte(tradesTable.timestamp, today), ne(tradesTable.status, "skipped")));
   const todayTrades = todayRow?.total ?? 0;
 
-  // Real ETH stats via SQL aggregation on text→numeric cast
+  // Real ETH stats via SQL aggregation (NULLIF guards against empty-string values)
   const [ethSpentRow] = await db
     .select({
       total: sql<string>`COALESCE(SUM(NULLIF(buy_amount_eth, '')::numeric), 0)::text`,
