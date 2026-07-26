@@ -11,10 +11,9 @@ import {
 import { Input } from "@/components/ui/input";
 import { Switch } from "@/components/ui/switch";
 import { Select, SelectContent, SelectItem, SelectTrigger, SelectValue } from "@/components/ui/select";
-import { Form, FormControl, FormDescription, FormField, FormItem, FormLabel, FormMessage } from "@/components/ui/form";
-import { Separator } from "@/components/ui/separator";
+import { Form, FormControl, FormField, FormItem } from "@/components/ui/form";
 import { useToast } from "@/hooks/use-toast";
-import { Save, ShieldAlert, Zap, TrendingUp, Settings2 } from "lucide-react";
+import { Save, ShieldAlert, Zap, Settings2 } from "lucide-react";
 import { cn } from "@/lib/utils";
 
 const configSchema = z.object({
@@ -105,7 +104,7 @@ export default function Settings() {
       {
         onSuccess: (updated) => {
           queryClient.setQueryData(getGetConfigQueryKey(), updated);
-          toast({ title: "Configuration Saved", description: "Sniper settings updated." });
+          toast({ title: "Configuration Saved", description: "Sniper settings have been updated successfully." });
         },
         onError: () => {
           toast({ variant: "destructive", title: "Save Failed", description: "Could not save configuration." });
@@ -165,7 +164,7 @@ export default function Settings() {
                           <SelectValue />
                         </SelectTrigger>
                         <SelectContent className="bg-[#0d0d1a] border-white/10 text-white rounded-xl">
-                          <SelectItem value="whitelist">Whitelist</SelectItem>
+                          <SelectItem value="whitelist">Whitelist Only</SelectItem>
                           <SelectItem value="all">All Creators</SelectItem>
                         </SelectContent>
                       </Select>
@@ -185,7 +184,7 @@ export default function Settings() {
                 control={form.control}
                 name="buyAmountEth"
                 render={({ field }) => (
-                  <FieldRow label="Buy Amount (ETH)" desc="Per-snipe spend">
+                  <FieldRow label="Buy Amount (ETH)" desc="Amount to spend per snipe">
                     <FormControl>
                       <Input {...field} type="text" className={inputClass} placeholder="0.01" />
                     </FormControl>
@@ -197,11 +196,12 @@ export default function Settings() {
                 control={form.control}
                 name="slippagePercent"
                 render={({ field }) => (
-                  <FieldRow label="Slippage (%)" desc="Max allowed slippage">
+                  <FieldRow label="Slippage (%)" desc="Tolerance for price movement">
                     <FormControl>
                       <Input
                         {...field}
                         type="number"
+                        step="0.1"
                         className={inputClass}
                         onChange={(e) => field.onChange(Number(e.target.value))}
                       />
@@ -214,7 +214,7 @@ export default function Settings() {
                 control={form.control}
                 name="maxGasGwei"
                 render={({ field }) => (
-                  <FieldRow label="Max Gas (Gwei)" desc="Gas price ceiling">
+                  <FieldRow label="Max Gas (Gwei)" desc="Absolute ceiling for network fees">
                     <FormControl>
                       <Input
                         {...field}
@@ -235,7 +235,7 @@ export default function Settings() {
                     <FormControl>
                       <Input
                         {...field}
-                        value={field.value || ""}
+                        value={field.value ?? ""}
                         onChange={(e) => field.onChange(e.target.value ? Number(e.target.value) : null)}
                         type="number"
                         className={inputClass}
@@ -250,15 +250,17 @@ export default function Settings() {
                 control={form.control}
                 name="maxBuysPerDay"
                 render={({ field }) => (
-                  <FieldRow label="Max Buys/Day" desc="Daily trade limit">
+                  <FieldRow label="Max Buys/Wallet/Day" desc="Stop buying once limit reached. Empty = unlimited">
                     <FormControl>
                       <Input
                         {...field}
-                        value={field.value || ""}
-                        onChange={(e) => field.onChange(e.target.value ? Number(e.target.value) : null)}
+                        value={field.value ?? ""}
+                        onChange={(e) => field.onChange(e.target.value ? parseInt(e.target.value, 10) : null)}
                         type="number"
+                        min="1"
+                        step="1"
                         className={inputClass}
-                        placeholder="Unlimited"
+                        placeholder="No limit"
                       />
                     </FormControl>
                   </FieldRow>
@@ -276,7 +278,7 @@ export default function Settings() {
                 control={form.control}
                 name="autoSell"
                 render={({ field }) => (
-                  <FieldRow label="Auto Sell" desc="Automatically sell on target/stop">
+                  <FieldRow label="Auto-Sell Enabled" desc="Automatically sell positions on TP/SL">
                     <FormControl>
                       <Switch
                         checked={field.value}
@@ -288,43 +290,50 @@ export default function Settings() {
                 )}
               />
 
-              <FormField
-                control={form.control}
-                name="takeProfitPercent"
-                render={({ field }) => (
-                  <FieldRow label="Take Profit (%)" desc="Sell at this gain">
-                    <FormControl>
-                      <Input
-                        {...field}
-                        value={field.value || ""}
-                        onChange={(e) => field.onChange(e.target.value ? Number(e.target.value) : null)}
-                        type="number"
-                        className={cn(inputClass, "text-green-400")}
-                        placeholder="Optional"
-                      />
-                    </FormControl>
-                  </FieldRow>
-                )}
-              />
+              {/* TP/SL — only visible when autoSell is on (matches original behavior) */}
+              {form.watch("autoSell") && (
+                <div className="pt-3 pb-1 grid grid-cols-2 gap-3 pl-3 border-l-2 border-violet-500/30 ml-1 mt-1">
+                  <FormField
+                    control={form.control}
+                    name="takeProfitPercent"
+                    render={({ field }) => (
+                      <FormItem>
+                        <p className="text-white/50 text-xs font-semibold uppercase tracking-wider mb-2">Take Profit (%)</p>
+                        <FormControl>
+                          <Input
+                            {...field}
+                            value={field.value ?? ""}
+                            onChange={(e) => field.onChange(e.target.value ? Number(e.target.value) : null)}
+                            type="number"
+                            className={cn(inputClass, "w-full text-green-400")}
+                            placeholder="Optional"
+                          />
+                        </FormControl>
+                      </FormItem>
+                    )}
+                  />
 
-              <FormField
-                control={form.control}
-                name="stopLossPercent"
-                render={({ field }) => (
-                  <FieldRow label="Stop Loss (%)" desc="Sell at this loss">
-                    <FormControl>
-                      <Input
-                        {...field}
-                        value={field.value || ""}
-                        onChange={(e) => field.onChange(e.target.value ? Number(e.target.value) : null)}
-                        type="number"
-                        className={cn(inputClass, "text-red-400")}
-                        placeholder="Optional"
-                      />
-                    </FormControl>
-                  </FieldRow>
-                )}
-              />
+                  <FormField
+                    control={form.control}
+                    name="stopLossPercent"
+                    render={({ field }) => (
+                      <FormItem>
+                        <p className="text-white/50 text-xs font-semibold uppercase tracking-wider mb-2">Stop Loss (%)</p>
+                        <FormControl>
+                          <Input
+                            {...field}
+                            value={field.value ?? ""}
+                            onChange={(e) => field.onChange(e.target.value ? Number(e.target.value) : null)}
+                            type="number"
+                            className={cn(inputClass, "w-full text-red-400")}
+                            placeholder="Optional"
+                          />
+                        </FormControl>
+                      </FormItem>
+                    )}
+                  />
+                </div>
+              )}
             </div>
           </div>
 
@@ -335,7 +344,7 @@ export default function Settings() {
             className="w-full h-13 rounded-2xl bg-gradient-to-r from-violet-600 to-violet-500 hover:from-violet-500 hover:to-violet-400 text-white font-bold text-sm transition-all shadow-lg shadow-violet-500/20 flex items-center justify-center gap-2 active:scale-[0.98] disabled:opacity-50 disabled:cursor-not-allowed"
           >
             <Save className="w-4 h-4" />
-            {updateConfig.isPending ? "Saving..." : "Save Settings"}
+            {updateConfig.isPending ? "SAVING..." : "SAVE SETTINGS"}
           </button>
         </form>
       </Form>
