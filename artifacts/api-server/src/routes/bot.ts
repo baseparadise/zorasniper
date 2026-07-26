@@ -1,6 +1,6 @@
 import { Router, type IRouter } from "express";
 import { db, tradesTable } from "@workspace/db";
-import { count } from "drizzle-orm";
+import { count, ne } from "drizzle-orm";
 import { botState } from "../bot/state";
 import { startSniper, stopSniper } from "../bot/sniper";
 import { getWalletAddress } from "../bot/trader";
@@ -10,7 +10,6 @@ const router: IRouter = Router();
 
 function buildStatusResponse() {
   const state = botState.get();
-  // Lazily populate wallet address from private key if bot has not started yet
   if (!state.walletAddress) {
     const addr = getWalletAddress();
     if (addr) botState.update({ walletAddress: addr });
@@ -28,8 +27,11 @@ function buildStatusResponse() {
 }
 
 router.get("/bot/status", async (_req, res): Promise<void> => {
-  // Sync totalTrades from DB on demand
-  const [row] = await db.select({ total: count() }).from(tradesTable);
+  // Sync totalTrades from DB — exclude "skipped" (detected but not attempted)
+  const [row] = await db
+    .select({ total: count() })
+    .from(tradesTable)
+    .where(ne(tradesTable.status, "skipped"));
   botState.update({ totalTrades: row?.total ?? 0 });
 
   res.json(GetBotStatusResponse.parse(buildStatusResponse()));
