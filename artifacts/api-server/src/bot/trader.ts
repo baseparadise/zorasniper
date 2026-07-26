@@ -61,7 +61,7 @@ export async function executeBuy(params: TradeParams): Promise<void> {
     tokenSymbol,
     creatorAddress,
     buyAmountEth,
-    slippagePercent,
+    slippagePercent: _slippagePercent,
     maxGasGwei,
   } = params;
 
@@ -87,10 +87,11 @@ export async function executeBuy(params: TradeParams): Promise<void> {
     const walletClient = createWalletClient({ account, chain: base, transport: http(getRpcUrl()) });
 
     const value = parseEther(buyAmountEth);
-    const minOrderSize = 0n; // accept any amount (slippage handled by contract)
+    const minOrderSize = 0n; // accept any amount; slippage protection via maxFeePerGas
 
+    // Convert gwei → wei correctly: multiply by 1e9
+    const maxFeePerGas = BigInt(Math.round(maxGasGwei * 1e9));
     const gasPrice = await publicClient.getGasPrice();
-    const maxFeePerGas = parseEther(maxGasGwei.toString()) / 1_000_000_000n; // gwei to wei
     const effectiveGasPrice = gasPrice > maxFeePerGas ? maxFeePerGas : gasPrice;
 
     const txHash = await walletClient.writeContract({
@@ -116,23 +117,28 @@ export async function executeBuy(params: TradeParams): Promise<void> {
     const receipt = await publicClient.waitForTransactionReceipt({ hash: txHash, timeout: 60_000 });
 
     const gasUsedEth = formatEther(receipt.gasUsed * (receipt.effectiveGasPrice ?? effectiveGasPrice));
+    const isConfirmed = receipt.status === "success";
 
     const [updated] = await db
       .update(tradesTable)
       .set({
         txHash,
-        status: receipt.status === "success" ? "confirmed" : "failed",
+        status: isConfirmed ? "confirmed" : "failed",
         gasUsedEth,
         blockNumber: Number(receipt.blockNumber),
+        // If receipt came back failed, record that the tx reverted
+        ...(isConfirmed ? {} : { failReason: "Transaction reverted on-chain" }),
       })
       .where(eq(tradesTable.id, tradeRow.id))
       .returning();
 
-    // Increment creator snipe count
-    await db
-      .update(creatorsTable)
-      .set({ totalSniped: sql`${creatorsTable.totalSniped} + 1` })
-      .where(eq(creatorsTable.address, creatorAddress.toLowerCase()));
+    // Only increment creator snipe count for confirmed (successful) buys
+    if (isConfirmed) {
+      await db
+        .update(creatorsTable)
+        .set({ totalSniped: sql`${creatorsTable.totalSniped} + 1` })
+        .where(eq(creatorsTable.address, creatorAddress.toLowerCase()));
+    }
 
     const state = botState.get();
     botState.update({
@@ -145,11 +151,17 @@ export async function executeBuy(params: TradeParams): Promise<void> {
     logger.info({ txHash, status: updated.status, tokenName }, "Buy settled");
   } catch (err) {
     logger.error({ err, tokenAddress }, "Buy failed");
+    const failReason = (err instanceof Error ? err.message : String(err)).slice(0, 500);
     const [updated] = await db
       .update(tradesTable)
-      .set({ status: "failed" })
+      .set({ status: "failed", failReason })
       .where(eq(tradesTable.id, tradeRow.id))
       .returning();
+    // Count failed attempts toward today's snipe count
+    botState.update({
+      snipedToday: botState.get().snipedToday + 1,
+      lastEventAt: new Date().toISOString(),
+    });
     broadcast("trade", updated);
   }
 }
@@ -167,6 +179,7 @@ export async function getWalletBalance(): Promise<{ address: string; balanceEth:
     return null;
   }
 }
+
 // Synchronously derive wallet address from private key — no RPC call needed.
 // Safe to call at any time; returns null if WALLET_PRIVATE_KEY is missing or malformed.
 export function getWalletAddress(): string | null {
