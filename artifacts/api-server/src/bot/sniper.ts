@@ -48,8 +48,8 @@ function parseStoredNumber(val: string | null | undefined): number | null {
   return isNaN(n) ? null : n;
 }
 
-/** Count non-failed trades for a creator today (UTC midnight → now).
- *  Failed trades are excluded so a bad RPC day doesn't burn the daily quota. */
+/** Count non-failed, non-skipped trades for a creator today (UTC midnight → now).
+ *  Failed/skipped trades are excluded so they don't burn the daily quota. */
 async function countTodayBuys(creatorAddr: string): Promise<number> {
   const todayStart = new Date();
   todayStart.setUTCHours(0, 0, 0, 0);
@@ -61,11 +61,39 @@ async function countTodayBuys(creatorAddr: string): Promise<number> {
       and(
         eq(tradesTable.creatorAddress, creatorAddr),
         gte(tradesTable.timestamp, todayStart),
-        ne(tradesTable.status, "failed")
+        ne(tradesTable.status, "failed"),
+        ne(tradesTable.status, "skipped")
       )
     );
 
   return count ?? 0;
+}
+
+/** Insert a "skipped" record so users can verify deploy detection even when not buying. */
+async function recordSkipped(
+  coin: Address,
+  name: string,
+  symbol: string,
+  creatorAddr: string,
+  reason: string
+): Promise<void> {
+  try {
+    const [row] = await db
+      .insert(tradesTable)
+      .values({
+        tokenAddress: coin,
+        tokenName: name,
+        tokenSymbol: symbol,
+        creatorAddress: creatorAddr,
+        buyAmountEth: "0",
+        status: "skipped",
+        failReason: reason,
+      })
+      .returning();
+    broadcast("trade", row);
+  } catch (err) {
+    logger.error({ err }, "Failed to record skipped trade");
+  }
 }
 
 export async function startSniper(): Promise<void> {
@@ -111,7 +139,13 @@ export async function startSniper(): Promise<void> {
           broadcast("event", { type: "coin_created", coin, name, symbol, creator: creatorAddr });
 
           const config = await loadConfig();
-          if (!config.enabled) continue;
+
+          // Bot is globally disabled — record detection but skip buy
+          if (!config.enabled) {
+            logger.info({ creatorAddr }, "Bot is disabled, skipping buy");
+            await recordSkipped(coin as Address, name, symbol, creatorAddr, "Bot is disabled");
+            continue;
+          }
 
           let shouldSnipe = false;
           let creatorRow: typeof creatorsTable.$inferSelect | null = null;
@@ -131,6 +165,7 @@ export async function startSniper(): Promise<void> {
 
           if (!shouldSnipe) {
             logger.debug({ creatorAddr }, "Creator not in whitelist, skipping");
+            await recordSkipped(coin as Address, name, symbol, creatorAddr, "Creator not in whitelist");
             continue;
           }
 
@@ -147,10 +182,12 @@ export async function startSniper(): Promise<void> {
           if (effectiveMaxBuysPerDay != null && effectiveMaxBuysPerDay > 0) {
             const todayCount = await countTodayBuys(creatorAddr);
             if (todayCount >= effectiveMaxBuysPerDay) {
+              const reason = `Daily buy limit reached (${todayCount}/${effectiveMaxBuysPerDay} today)`;
               logger.info(
                 { creatorAddr, todayCount, limit: effectiveMaxBuysPerDay },
                 "Daily buy limit reached for this wallet — skipping"
               );
+              await recordSkipped(coin as Address, name, symbol, creatorAddr, reason);
               broadcast("event", {
                 type: "limit_reached",
                 creator: creatorAddr,
@@ -163,17 +200,8 @@ export async function startSniper(): Promise<void> {
           // ─────────────────────────────────────────────────────────────────
 
           logger.info(
-            {
-              coin,
-              name,
-              creator: creatorAddr,
-              buyAmountEth: effectiveBuyAmount,
-              slippagePercent: effectiveSlippage,
-              maxGasGwei: effectiveMaxGas,
-              maxBuysPerDay: effectiveMaxBuysPerDay ?? "unlimited",
-              settingsSource: creatorRow?.buyAmountEth ? "per-wallet" : "global",
-            },
-            "Sniping coin"
+            { creatorAddr, coin, effectiveBuyAmount },
+            "Creator matched — executing snipe"
           );
 
           // Fire-and-forget: don't await so we keep listening
