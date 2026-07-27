@@ -45,6 +45,18 @@ const ERC20_BALANCE_ABI = [
   },
 ] as const;
 
+// Zora market types passed to buy() as a guard.
+// Passing the wrong type causes an on-chain revert.
+//   0 = BONDING_CURVE  (CoinCreated / V3 coins)
+//   1 = UNISWAP_V4     (CoinCreatedV4, CreatorCoinCreated, TrendCoinCreated)
+const MARKET_TYPE_BONDING_CURVE = 0;
+const MARKET_TYPE_UNISWAP_V4 = 1;
+const UNISWAP_V4_EVENTS = new Set([
+  "CoinCreatedV4",
+  "CreatorCoinCreated",
+  "TrendCoinCreated",
+]);
+
 export interface TradeParams {
   tokenAddress: Address;
   tokenName: string;
@@ -53,6 +65,8 @@ export interface TradeParams {
   buyAmountEth: string;
   slippagePercent: number;
   maxGasGwei: number;
+  /** The factory event that triggered this snipe — used to derive expectedMarketType. */
+  eventName: string;
 }
 
 function getRpcUrl(): string {
@@ -89,9 +103,16 @@ export async function executeBuy(params: TradeParams): Promise<void> {
     buyAmountEth,
     slippagePercent,
     maxGasGwei,
+    eventName,
   } = params;
 
-  logger.info({ tokenAddress, tokenName, buyAmountEth }, "Executing buy");
+  // Derive the correct market type from the factory event that created this coin.
+  // Passing the wrong value causes buy() to revert on-chain.
+  const expectedMarketType = UNISWAP_V4_EVENTS.has(eventName)
+    ? MARKET_TYPE_UNISWAP_V4
+    : MARKET_TYPE_BONDING_CURVE;
+
+  logger.info({ tokenAddress, tokenName, buyAmountEth, eventName, expectedMarketType }, "Executing buy");
 
   const [tradeRow] = await db
     .insert(tradesTable)
@@ -115,7 +136,7 @@ export async function executeBuy(params: TradeParams): Promise<void> {
 
     const value = parseEther(buyAmountEth);
 
-    // Bug #2 fix: simulate the buy to get the expected token output, then apply
+    // Simulate the buy to get the expected token output, then apply
     // slippagePercent as a minimum order size so the tx reverts on-chain if the
     // price has moved too far by the time our tx lands.
     let minOrderSize = 0n;
@@ -124,7 +145,7 @@ export async function executeBuy(params: TradeParams): Promise<void> {
         address: tokenAddress,
         abi: ZORA_COIN_ABI,
         functionName: "buy",
-        args: [account.address, account.address, ZERO_ADDRESS, "zora-sniper", 0, 0n, 0n],
+        args: [account.address, account.address, ZERO_ADDRESS, "zora-sniper", expectedMarketType, 0n, 0n],
         value,
         account,
       });
@@ -137,7 +158,7 @@ export async function executeBuy(params: TradeParams): Promise<void> {
       );
     } catch (simErr) {
       logger.warn(
-        { simErr, tokenAddress },
+        { simErr, tokenAddress, expectedMarketType },
         "Buy simulation failed — proceeding with minOrderSize=0 (no slippage protection)"
       );
       minOrderSize = 0n;
@@ -166,7 +187,7 @@ export async function executeBuy(params: TradeParams): Promise<void> {
         account.address,
         ZERO_ADDRESS,
         "zora-sniper",
-        0,
+        expectedMarketType,
         minOrderSize,
         0n,
       ],
