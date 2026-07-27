@@ -202,13 +202,28 @@ export async function executeBuy(params: TradeParams): Promise<void> {
 
     // ── Step 3: EIP-1559 gas — cap at user-configured maxGasGwei ─────────────
     const maxFeeCapWei = BigInt(Math.round(maxGasGwei * 1e9));
-    const feeEstimate = await publicClient.estimateFeesPerGas();
+    const [feeEstimate, estimatedGas] = await Promise.all([
+      publicClient.estimateFeesPerGas(),
+      publicClient.estimateGas({
+        to: call.target as Address,
+        data: call.data as `0x${string}`,
+        value,
+        account: account.address,
+      }),
+    ]);
     const maxFeePerGas =
       feeEstimate.maxFeePerGas < maxFeeCapWei ? feeEstimate.maxFeePerGas : maxFeeCapWei;
     const maxPriorityFeePerGas =
       feeEstimate.maxPriorityFeePerGas < maxFeePerGas
         ? feeEstimate.maxPriorityFeePerGas
         : maxFeePerGas;
+    // Buffer 10% di atas estimasi — cegah out-of-gas untuk Uniswap V4 hook calls
+    const gasLimit = (estimatedGas * 110n) / 100n;
+
+    logger.info(
+      { estimatedGas: estimatedGas.toString(), gasLimit: gasLimit.toString(), maxFeePerGas: maxFeePerGas.toString() },
+      "Gas estimated"
+    );
 
     // ── Step 4: Send transaction ───────────────────────────────────────────────
     const txHash = await walletClient.sendTransaction({
@@ -217,6 +232,7 @@ export async function executeBuy(params: TradeParams): Promise<void> {
       value,
       chain: base,
       account,
+      gas: gasLimit,
       maxFeePerGas,
       maxPriorityFeePerGas,
     });
