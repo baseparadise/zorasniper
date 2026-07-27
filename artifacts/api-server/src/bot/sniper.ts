@@ -5,7 +5,7 @@ import { eq, and, gte, ne, sql, inArray } from "drizzle-orm";
 import { logger } from "../lib/logger";
 import { botState } from "./state";
 import { broadcast } from "./ws";
-import { executeBuy, getWalletBalance } from "./trader";
+import { executeBuy, getWalletBalance, recoverSniperTpSlMonitors } from "./trader";
 import { loadConfig } from "../lib/config";
 
 // Zora Coins factory on Base mainnet — emits CoinCreated, CoinCreatedV4,
@@ -336,6 +336,8 @@ async function handleCoinCreated(params: {
     slippagePercent: effectiveSlippage,
     maxGasGwei: effectiveMaxGas,
     eventName,
+    takeProfitPercent: config.takeProfitPercent,
+    stopLossPercent: config.stopLossPercent,
   }).catch((err) => logger.error({ err }, "executeBuy error"));
 }
 
@@ -449,6 +451,11 @@ export async function startSniper(): Promise<void> {
 
   reconnectAttempts = 0;
   attachListener();
+
+  // Restart TP/SL monitors for sniper trades that survived a server restart
+  recoverSniperTpSlMonitors().catch((err) =>
+    logger.error({ err }, "Sniper TP/SL recovery failed")
+  );
 
   // Refresh wallet balance every 30s
   balanceInterval = setInterval(async () => {
