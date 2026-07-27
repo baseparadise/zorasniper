@@ -768,23 +768,34 @@ router.get("/positions", async (_req, res): Promise<void> => {
     walletAddress = ZERO_ADDRESS;
   }
 
-  const positions = await Promise.all(
+  const settled = await Promise.all(
     openTrades.map(async (trade: Trade) => {
       const addr = trade.tokenAddress as Address;
 
-      let currentBalanceTokens = "0";
+      let rawBal = 0n;
       try {
-        const rawBal = await publicClient.readContract({
+        rawBal = await publicClient.readContract({
           address: addr,
           abi: ERC20_ABI,
           functionName: "balanceOf",
           args: [walletAddress],
         });
-        currentBalanceTokens = formatUnits(rawBal, 18);
       } catch {
-        /* keep 0 */
+        /* keep 0n */
       }
 
+      // Balance is zero — position was closed externally (sold from wallet).
+      // Auto-mark as sold so it disappears from open positions.
+      if (rawBal === 0n) {
+        await db
+          .update(tradesTable)
+          .set({ status: "sold", failReason: "closed externally — balance is 0" })
+          .where(eq(tradesTable.id, trade.id));
+        logger.info({ tradeId: trade.id, tokenAddress: trade.tokenAddress }, "Position auto-closed: balance 0 (external sell)");
+        return null; // exclude from response
+      }
+
+      const currentBalanceTokens = formatUnits(rawBal, 18);
       const entryPriceEth = trade.entryPriceEth ?? "0";
       const entryPriceNum = parseFloat(entryPriceEth);
       const balNum = parseFloat(currentBalanceTokens);
@@ -806,7 +817,7 @@ router.get("/positions", async (_req, res): Promise<void> => {
             const currentPrice = 0.0001 / probeTokens;
             const currentValue = balNum * currentPrice;
             currentValueEth = currentValue.toFixed(6);
-            const buyEth = parseFloat(trade.buyAmountEth);
+            const buyEth = parseFloat(trade.buyAmountEth ?? "0");
             pnlPercent = buyEth > 0 ? ((currentValue - buyEth) / buyEth) * 100 : 0;
           }
         } catch {
@@ -817,6 +828,9 @@ router.get("/positions", async (_req, res): Promise<void> => {
       return { trade, currentBalanceTokens, entryPriceEth, currentValueEth, pnlPercent };
     }),
   );
+
+  // Filter out positions that were auto-closed (null entries)
+  const positions = settled.filter((p) => p !== null);
 
   res.json(positions);
 });
