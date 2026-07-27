@@ -33,17 +33,24 @@ app.use(express.urlencoded({ extended: true }));
 
 app.use("/api", router);
 
-// Serve frontend static files if built dist exists
+// Serve frontend static files — check built Vite dist first, then static public folder
 const frontendDist = join(process.cwd(), "artifacts/zora-sniper/dist/public");
-if (existsSync(frontendDist)) {
-  app.use(express.static(frontendDist));
+const staticPublic = join(process.cwd(), "artifacts/api-server/public");
+const staticRoot = existsSync(frontendDist)
+  ? frontendDist
+  : existsSync(staticPublic)
+    ? staticPublic
+    : null;
+
+if (staticRoot) {
+  app.use(express.static(staticRoot));
   // Fallback to index.html for client-side routing
   app.get("/{*splat}", (_req, res) => {
-    res.sendFile(join(frontendDist, "index.html"));
+    res.sendFile(join(staticRoot, "index.html"));
   });
-  logger.info({ frontendDist }, "Serving frontend static files");
+  logger.info({ staticRoot }, "Serving frontend static files");
 } else {
-  logger.warn({ frontendDist }, "Frontend dist not found — skipping static file serving");
+  logger.warn({ frontendDist, staticPublic }, "No frontend found — skipping static file serving");
 }
 
 // JSON error handler — returns actual error details instead of blank HTML page.
