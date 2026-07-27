@@ -1,0 +1,417 @@
+<!DOCTYPE html>
+<html lang="id">
+<head>
+  <meta charset="UTF-8" />
+  <meta name="viewport" content="width=device-width, initial-scale=1.0" />
+  <title>Zora Sniper</title>
+  <script src="https://cdn.tailwindcss.com"></script>
+  <script defer src="https://cdn.jsdelivr.net/npm/alpinejs@3.x.x/dist/cdn.min.js"></script>
+  <script>
+    tailwind.config = {
+      theme: {
+        extend: {
+          colors: { zora: { 50:'#f0f4ff', 100:'#dde8ff', 500:'#4f6ef7', 600:'#3b5bf0', 700:'#2d49d8' } }
+        }
+      }
+    };
+  </script>
+  <style>
+    [x-cloak] { display: none !important; }
+    .tab-active { border-bottom: 2px solid #4f6ef7; color: #4f6ef7; }
+    .check-ok { color: #16a34a; }
+    .check-fail { color: #dc2626; }
+  </style>
+</head>
+<body class="bg-gray-950 text-gray-100 min-h-screen font-sans antialiased">
+
+<nav class="border-b border-gray-800 bg-gray-900 px-6 py-4 flex items-center gap-3">
+  <svg class="w-6 h-6 text-zora-500" fill="none" stroke="currentColor" stroke-width="2" viewBox="0 0 24 24">
+    <path stroke-linecap="round" stroke-linejoin="round" d="M13 10V3L4 14h7v7l9-11h-7z"/>
+  </svg>
+  <span class="font-bold text-lg tracking-tight">Zora Sniper</span>
+  <span class="ml-auto text-xs text-gray-500">Base Mainnet</span>
+</nav>
+
+<div x-data="app()" x-cloak class="max-w-4xl mx-auto px-4 py-6">
+
+  <div class="flex gap-6 border-b border-gray-800 mb-8">
+    <button @click="tab='dashboard'" :class="tab==='dashboard' ? 'tab-active' : 'text-gray-400 hover:text-gray-200'"
+      class="pb-3 text-sm font-medium transition-colors">Dashboard</button>
+    <button @click="tab='manual'; loadManualTrades()" :class="tab==='manual' ? 'tab-active' : 'text-gray-400 hover:text-gray-200'"
+      class="pb-3 text-sm font-medium transition-colors">Manual Buy</button>
+    <button @click="tab='test'" :class="tab==='test' ? 'tab-active' : 'text-gray-400 hover:text-gray-200'"
+      class="pb-3 text-sm font-medium transition-colors flex items-center gap-2">
+      Logic Test
+      <span class="bg-zora-600 text-white text-[10px] px-1.5 py-0.5 rounded font-semibold">NEW</span>
+    </button>
+  </div>
+
+  <!-- DASHBOARD -->
+  <div x-show="tab==='dashboard'">
+    <div class="grid grid-cols-2 sm:grid-cols-4 gap-4 mb-8">
+      <template x-if="botStatus">
+        <template x-for="item in [
+          {label:'Status', val: botStatus.running ? 'Running' : 'Stopped', color: botStatus.running ? 'text-green-400' : 'text-red-400'},
+          {label:'Total Trades', val: botStatus.totalTrades, color:''},
+          {label:'Sniped Today', val: botStatus.snipedToday, color:''},
+          {label:'Uptime', val: fmtUptime(botStatus.uptimeSeconds), color:''}
+        ]" :key="item.label">
+          <div class="bg-gray-900 rounded-xl border border-gray-800 p-4">
+            <p class="text-xs text-gray-500 mb-1" x-text="item.label"></p>
+            <p class="text-lg font-semibold" :class="item.color" x-text="item.val"></p>
+          </div>
+        </template>
+      </template>
+      <template x-if="!botStatus">
+        <template x-for="i in [1,2,3,4]" :key="i">
+          <div class="bg-gray-900 rounded-xl border border-gray-800 p-4 h-20 animate-pulse"></div>
+        </template>
+      </template>
+    </div>
+
+    <template x-if="botStatus">
+      <div class="flex gap-3 mb-8">
+        <button @click="startBot()" :disabled="botStatus.running"
+          class="px-5 py-2 rounded-lg bg-green-600 hover:bg-green-500 disabled:opacity-40 disabled:cursor-not-allowed text-sm font-medium transition-colors">
+          Start Bot
+        </button>
+        <button @click="stopBot()" :disabled="!botStatus.running"
+          class="px-5 py-2 rounded-lg bg-red-700 hover:bg-red-600 disabled:opacity-40 disabled:cursor-not-allowed text-sm font-medium transition-colors">
+          Stop Bot
+        </button>
+        <span x-show="botStatus.walletAddress" class="ml-auto self-center text-xs text-gray-500 font-mono truncate max-w-[180px]" x-text="botStatus.walletAddress"></span>
+      </div>
+    </template>
+
+    <div class="bg-gray-900 rounded-xl border border-gray-800 overflow-hidden">
+      <div class="px-5 py-4 border-b border-gray-800 flex items-center justify-between">
+        <h2 class="text-sm font-semibold">Recent Trades</h2>
+        <button @click="loadDashboard()" class="text-xs text-gray-500 hover:text-gray-300">Refresh</button>
+      </div>
+      <div class="divide-y divide-gray-800">
+        <template x-if="recentTrades.length === 0">
+          <div class="px-5 py-8 text-center text-sm text-gray-600">Belum ada trade</div>
+        </template>
+        <template x-for="t in recentTrades" :key="t.id">
+          <div class="px-5 py-3 flex items-center gap-3 text-sm hover:bg-gray-800/50 transition-colors">
+            <span :class="{'text-yellow-400':t.status==='pending','text-blue-400':t.status==='confirmed','text-red-400':t.status==='failed','text-green-400':t.status==='sold','text-gray-500':t.status==='skipped'}"
+              class="w-20 text-xs font-medium capitalize" x-text="t.status"></span>
+            <span class="font-medium" x-text="t.tokenSymbol"></span>
+            <span class="text-gray-500 font-mono text-xs flex-1 truncate" x-text="t.tokenAddress"></span>
+            <span class="text-gray-400 text-xs" x-text="t.buyAmountEth + ' ETH'"></span>
+            <template x-if="t.pnlEth">
+              <span :class="parseFloat(t.pnlEth)>=0?'text-green-400':'text-red-400'" class="text-xs font-mono"
+                x-text="(parseFloat(t.pnlEth)>=0?'+':'')+parseFloat(t.pnlEth).toFixed(5)+' ETH'"></span>
+            </template>
+          </div>
+        </template>
+      </div>
+    </div>
+  </div>
+
+  <!-- MANUAL BUY -->
+  <div x-show="tab==='manual'">
+    <div class="bg-gray-900 rounded-xl border border-gray-800 p-6 mb-6">
+      <h2 class="text-sm font-semibold mb-5">Manual Buy</h2>
+      <div x-show="tokenInfo" class="mb-5 p-4 bg-gray-800/60 rounded-lg flex items-center gap-4">
+        <div>
+          <p class="text-base font-bold" x-text="tokenInfo?.name + ' (' + tokenInfo?.symbol + ')'"></p>
+          <p class="text-xs text-gray-500 mt-0.5">Price: <span class="text-gray-300 font-mono" x-text="fmtPrice(tokenInfo?.priceEth)+' ETH'"></span>
+            &nbsp;&middot;&nbsp; MC: <span class="text-gray-300 font-mono" x-text="parseFloat(tokenInfo?.mcEth||'0').toFixed(3)+' ETH'"></span></p>
+        </div>
+        <div class="ml-auto text-right">
+          <p class="text-xs text-gray-500">Balance kamu</p>
+          <p class="text-sm font-mono" x-text="parseFloat(tokenInfo?.walletBalance||'0').toFixed(4)"></p>
+        </div>
+      </div>
+      <form @submit.prevent="submitManualBuy()" class="space-y-4">
+        <div>
+          <label class="block text-xs text-gray-400 mb-1.5">Contract Address (CA)</label>
+          <input x-model="manualForm.tokenAddress" @blur="fetchTokenInfo(manualForm.tokenAddress)" placeholder="0x..."
+            class="w-full bg-gray-800 border border-gray-700 rounded-lg px-3 py-2.5 text-sm font-mono focus:outline-none focus:ring-1 focus:ring-zora-500" />
+        </div>
+        <div class="grid grid-cols-2 gap-4">
+          <div>
+            <label class="block text-xs text-gray-400 mb-1.5">Buy Amount (ETH)</label>
+            <input x-model="manualForm.buyAmountEth" type="number" step="0.001" min="0.001"
+              class="w-full bg-gray-800 border border-gray-700 rounded-lg px-3 py-2.5 text-sm focus:outline-none focus:ring-1 focus:ring-zora-500" />
+          </div>
+          <div>
+            <label class="block text-xs text-gray-400 mb-1.5">Slippage (%)</label>
+            <input x-model="manualForm.slippagePercent" type="number" step="0.5" min="0.5" max="50"
+              class="w-full bg-gray-800 border border-gray-700 rounded-lg px-3 py-2.5 text-sm focus:outline-none focus:ring-1 focus:ring-zora-500" />
+          </div>
+        </div>
+        <div class="grid grid-cols-2 gap-4">
+          <div>
+            <label class="block text-xs text-gray-400 mb-1.5">Take Profit (%)</label>
+            <input x-model="manualForm.takeProfitPercent" type="number" step="5" min="1" placeholder="e.g. 50"
+              class="w-full bg-gray-800 border border-gray-700 rounded-lg px-3 py-2.5 text-sm focus:outline-none focus:ring-1 focus:ring-zora-500" />
+          </div>
+          <div>
+            <label class="block text-xs text-gray-400 mb-1.5">Stop Loss (%)</label>
+            <input x-model="manualForm.stopLossPercent" type="number" step="5" min="1" placeholder="e.g. 20"
+              class="w-full bg-gray-800 border border-gray-700 rounded-lg px-3 py-2.5 text-sm focus:outline-none focus:ring-1 focus:ring-zora-500" />
+          </div>
+        </div>
+        <button type="submit" :disabled="manualBuying"
+          class="w-full py-2.5 rounded-lg bg-zora-600 hover:bg-zora-500 disabled:opacity-50 text-sm font-semibold transition-colors">
+          <span x-text="manualBuying ? 'Submitting...' : 'Execute Buy'"></span>
+        </button>
+      </form>
+      <div x-show="manualResult" class="mt-4 p-3 rounded-lg"
+        :class="manualResult?.ok ? 'bg-green-900/30 border border-green-800' : 'bg-red-900/30 border border-red-800'">
+        <p class="text-sm" x-text="manualResult?.msg"></p>
+      </div>
+    </div>
+    <div class="bg-gray-900 rounded-xl border border-gray-800 overflow-hidden">
+      <div class="px-5 py-4 border-b border-gray-800"><h2 class="text-sm font-semibold">Recent Manual Trades</h2></div>
+      <div class="divide-y divide-gray-800">
+        <template x-if="manualTrades.length === 0">
+          <div class="px-5 py-8 text-center text-sm text-gray-600">Belum ada manual trade</div>
+        </template>
+        <template x-for="t in manualTrades" :key="t.id">
+          <div class="px-5 py-3 flex items-center gap-3 text-sm">
+            <span :class="{'text-yellow-400':t.status==='pending','text-blue-400':t.status==='confirmed','text-red-400':t.status==='failed','text-green-400':t.status==='sold'}"
+              class="w-20 text-xs font-medium capitalize" x-text="t.status"></span>
+            <span class="font-medium" x-text="t.tokenSymbol"></span>
+            <span class="text-gray-500 font-mono text-xs flex-1 truncate" x-text="t.tokenAddress"></span>
+            <span class="text-gray-400 text-xs" x-text="t.buyAmountEth+' ETH'"></span>
+            <template x-if="t.pnlEth">
+              <span :class="parseFloat(t.pnlEth)>=0?'text-green-400':'text-red-400'" class="text-xs font-mono"
+                x-text="(parseFloat(t.pnlEth)>=0?'+':'')+parseFloat(t.pnlEth).toFixed(5)+' ETH'"></span>
+            </template>
+          </div>
+        </template>
+      </div>
+    </div>
+  </div>
+
+  <!-- LOGIC TEST -->
+  <div x-show="tab==='test'">
+    <div class="bg-gray-900 rounded-xl border border-gray-800 p-6 mb-6">
+      <div class="flex items-start gap-3 mb-6">
+        <div class="bg-zora-600/20 rounded-lg p-2 mt-0.5">
+          <svg class="w-5 h-5 text-zora-500" fill="none" stroke="currentColor" stroke-width="2" viewBox="0 0 24 24">
+            <path stroke-linecap="round" stroke-linejoin="round" d="M9 12l2 2 4-4m6 2a9 9 0 11-18 0 9 9 0 0118 0z"/>
+          </svg>
+        </div>
+        <div>
+          <h2 class="text-sm font-semibold">Logic Test (Dry Run)</h2>
+          <p class="text-xs text-gray-500 mt-1 leading-relaxed">Simulasi buy logic pakai CA token Zora &mdash; <strong class="text-gray-400">tanpa spend ETH asli</strong>.<br/>Cukup masukkan CA dan klik Test untuk tahu apakah logic sniper akan berhasil atau gagal.</p>
+        </div>
+      </div>
+      <div class="space-y-4">
+        <div>
+          <label class="block text-xs text-gray-400 mb-1.5">Contract Address (CA) Token Zora</label>
+          <input x-model="testForm.tokenAddress" placeholder="0x..."
+            class="w-full bg-gray-800 border border-gray-700 rounded-lg px-3 py-2.5 text-sm font-mono focus:outline-none focus:ring-1 focus:ring-zora-500" />
+        </div>
+        <div>
+          <label class="block text-xs text-gray-400 mb-1.5">Simulasi ETH Amount <span class="text-gray-600">(opsional, default 0.001)</span></label>
+          <input x-model="testForm.buyAmountEth" type="number" step="0.001" min="0.0001" placeholder="0.001"
+            class="w-full bg-gray-800 border border-gray-700 rounded-lg px-3 py-2.5 text-sm focus:outline-none focus:ring-1 focus:ring-zora-500" />
+        </div>
+        <button @click="runTest()" :disabled="testing || !testForm.tokenAddress"
+          class="w-full py-3 rounded-lg bg-zora-600 hover:bg-zora-500 disabled:opacity-40 disabled:cursor-not-allowed text-sm font-semibold transition-colors flex items-center justify-center gap-2">
+          <span x-show="testing" class="w-4 h-4 border-2 border-white border-t-transparent rounded-full animate-spin"></span>
+          <span x-text="testing ? 'Mensimulasikan...' : 'Test Logic'"></span>
+        </button>
+      </div>
+    </div>
+
+    <div x-show="testResult"
+      x-transition:enter="transition ease-out duration-200"
+      x-transition:enter-start="opacity-0 translate-y-2"
+      x-transition:enter-end="opacity-100 translate-y-0">
+      <div class="rounded-xl border overflow-hidden"
+        :class="testResult?.success ? 'border-green-700 bg-green-950/30' : 'border-red-800 bg-red-950/20'">
+
+        <!-- Header -->
+        <div class="px-6 py-5 border-b" :class="testResult?.success ? 'border-green-800/50' : 'border-red-900/50'">
+          <div class="flex items-center gap-4">
+            <div class="w-12 h-12 rounded-full flex items-center justify-center text-2xl font-bold"
+              :class="testResult?.success ? 'bg-green-800/40 text-green-400' : 'bg-red-900/40 text-red-400'"
+              x-text="testResult?.success ? '✓' : '✗'"></div>
+            <div>
+              <p class="text-xl font-bold" :class="testResult?.success ? 'text-green-400' : 'text-red-400'"
+                x-text="testResult?.success ? 'Logic Berhasil' : 'Logic Gagal'"></p>
+              <p class="text-xs text-gray-400 mt-0.5 font-mono"
+                x-text="testResult?.tokenName ? testResult.tokenName+' ('+testResult.tokenSymbol+')' : testResult?.tokenAddress"></p>
+            </div>
+          </div>
+        </div>
+
+        <!-- Checks -->
+        <div class="px-6 py-5 border-b space-y-4" :class="testResult?.success ? 'border-green-800/30' : 'border-red-900/30'">
+          <p class="text-xs font-semibold text-gray-500 uppercase tracking-wider">Hasil Pemeriksaan</p>
+
+          <div class="flex items-center gap-3">
+            <span class="text-lg font-bold w-6" :class="testResult?.checks?.tokenReadable ? 'check-ok' : 'check-fail'"
+              x-text="testResult?.checks?.tokenReadable ? '✓' : '✗'"></span>
+            <div class="flex-1">
+              <p class="text-sm" :class="testResult?.checks?.tokenReadable ? 'text-gray-200' : 'text-gray-500'">Token terbaca on-chain</p>
+              <p class="text-xs text-gray-600">ERC20 valid, name &amp; symbol dapat dibaca</p>
+            </div>
+            <span x-show="testResult?.tokenSymbol" class="text-xs bg-gray-800 px-2 py-1 rounded font-mono text-gray-400"
+              x-text="testResult?.tokenSymbol"></span>
+          </div>
+
+          <div class="flex items-center gap-3">
+            <span class="text-lg font-bold w-6" :class="testResult?.checks?.buySimulatable ? 'check-ok' : 'check-fail'"
+              x-text="testResult?.checks?.buySimulatable ? '✓' : '✗'"></span>
+            <div class="flex-1">
+              <p class="text-sm" :class="testResult?.checks?.buySimulatable ? 'text-gray-200' : 'text-gray-500'">Buy simulation berhasil</p>
+              <p class="text-xs text-gray-600">Logic sniper buy() dapat dieksekusi di Base</p>
+            </div>
+          </div>
+        </div>
+
+        <!-- Success details -->
+        <template x-if="testResult?.success">
+          <div class="px-6 py-5 grid grid-cols-2 gap-5">
+            <div>
+              <p class="text-xs text-gray-500 mb-1">Token yang Akan Didapat</p>
+              <p class="text-base font-mono font-semibold text-green-300"
+                x-text="fmtTokens(testResult?.expectedTokensOut)+' '+testResult?.tokenSymbol"></p>
+            </div>
+            <div>
+              <p class="text-xs text-gray-500 mb-1">Min Order (5% slippage)</p>
+              <p class="text-base font-mono text-gray-300"
+                x-text="fmtTokens(testResult?.minOrderSize)+' '+testResult?.tokenSymbol"></p>
+            </div>
+            <div>
+              <p class="text-xs text-gray-500 mb-1">Entry Price</p>
+              <p class="text-sm font-mono text-gray-300"
+                x-text="fmtPrice(testResult?.entryPriceEth)+' ETH / token'"></p>
+            </div>
+            <div>
+              <p class="text-xs text-gray-500 mb-1">Simulasi ETH</p>
+              <p class="text-sm font-mono text-gray-300" x-text="testResult?.buyAmountEth+' ETH'"></p>
+            </div>
+          </div>
+        </template>
+
+        <!-- Error -->
+        <template x-if="!testResult?.success && testResult?.errorReason">
+          <div class="px-6 py-5">
+            <p class="text-xs text-gray-500 mb-2">Alasan Gagal</p>
+            <div class="bg-red-900/30 border border-red-900/50 rounded-lg px-4 py-3 text-xs font-mono text-red-300 break-all leading-relaxed"
+              x-text="testResult?.errorReason"></div>
+          </div>
+        </template>
+
+      </div>
+    </div>
+  </div>
+
+</div>
+
+<script>
+function app() {
+  return {
+    tab: 'test',
+    botStatus: null,
+    recentTrades: [],
+    manualTrades: [],
+    tokenInfo: null,
+    manualForm: { tokenAddress: '', buyAmountEth: '0.01', slippagePercent: 5, takeProfitPercent: '', stopLossPercent: '' },
+    manualBuying: false,
+    manualResult: null,
+    testForm: { tokenAddress: '', buyAmountEth: '0.001' },
+    testing: false,
+    testResult: null,
+
+    async init() {
+      await this.loadDashboard();
+      setInterval(() => { if (this.tab === 'dashboard') this.loadDashboard(); }, 15000);
+      setInterval(() => { if (this.tab === 'manual') this.loadManualTrades(); }, 10000);
+    },
+
+    async loadDashboard() {
+      try {
+        const [sRes, dRes] = await Promise.all([fetch('/api/bot/status'), fetch('/api/dashboard')]);
+        this.botStatus = await sRes.json();
+        const d = await dRes.json();
+        this.recentTrades = d.recentTrades || [];
+      } catch(e) { console.error(e); }
+    },
+
+    async loadManualTrades() {
+      try {
+        const r = await fetch('/api/manual/trades?limit=20');
+        const d = await r.json();
+        this.manualTrades = d.trades || [];
+      } catch(e) {}
+    },
+
+    async fetchTokenInfo(addr) {
+      if (!addr || !/^0x[0-9a-fA-F]{40}$/.test(addr)) { this.tokenInfo = null; return; }
+      try {
+        const r = await fetch('/api/manual/token-info?address=' + addr);
+        this.tokenInfo = r.ok ? await r.json() : null;
+      } catch(e) { this.tokenInfo = null; }
+    },
+
+    async startBot() { await fetch('/api/bot/start', {method:'POST'}); await this.loadDashboard(); },
+    async stopBot() { await fetch('/api/bot/stop', {method:'POST'}); await this.loadDashboard(); },
+
+    async submitManualBuy() {
+      this.manualBuying = true; this.manualResult = null;
+      try {
+        const body = {
+          tokenAddress: this.manualForm.tokenAddress,
+          buyAmountEth: this.manualForm.buyAmountEth,
+          slippagePercent: parseFloat(this.manualForm.slippagePercent),
+          takeProfitPercent: this.manualForm.takeProfitPercent ? parseFloat(this.manualForm.takeProfitPercent) : null,
+          stopLossPercent: this.manualForm.stopLossPercent ? parseFloat(this.manualForm.stopLossPercent) : null,
+        };
+        const r = await fetch('/api/manual/buy', {method:'POST', headers:{'Content-Type':'application/json'}, body:JSON.stringify(body)});
+        const d = await r.json();
+        this.manualResult = r.ok
+          ? {ok:true, msg:'Buy submitted! Trade ID: '+d.tradeId+' — '+d.tokenName+' ('+d.tokenSymbol+')'}
+          : {ok:false, msg: d.error||'Buy failed'};
+        if (r.ok) this.loadManualTrades();
+      } catch(e) {
+        this.manualResult = {ok:false, msg:String(e)};
+      } finally { this.manualBuying = false; }
+    },
+
+    async runTest() {
+      if (!this.testForm.tokenAddress) return;
+      this.testing = true; this.testResult = null;
+      try {
+        const r = await fetch('/api/manual/simulate', {
+          method: 'POST',
+          headers: {'Content-Type':'application/json'},
+          body: JSON.stringify({ tokenAddress: this.testForm.tokenAddress, buyAmountEth: this.testForm.buyAmountEth || '0.001' })
+        });
+        this.testResult = await r.json();
+      } catch(e) {
+        this.testResult = { success:false, tokenName:null, tokenSymbol:null,
+          errorReason:'Network error: '+String(e), checks:{tokenReadable:false, buySimulatable:false} };
+      } finally { this.testing = false; }
+    },
+
+    fmtUptime(s) {
+      if (!s) return '—';
+      const h = Math.floor(s/3600), m = Math.floor((s%3600)/60);
+      return h > 0 ? h+'h '+m+'m' : m+'m';
+    },
+    fmtPrice(p) {
+      if (!p || parseFloat(p)===0) return '0';
+      const n = parseFloat(p);
+      return n < 0.000001 ? n.toExponential(3) : n.toPrecision(4);
+    },
+    fmtTokens(t) {
+      if (!t) return '0';
+      const n = parseFloat(t);
+      if (n >= 1e6) return (n/1e6).toFixed(2)+'M';
+      if (n >= 1e3) return (n/1e3).toFixed(2)+'K';
+      return n.toFixed(4);
+    },
+  };
+}
+</script>
+</body>
+</html>
