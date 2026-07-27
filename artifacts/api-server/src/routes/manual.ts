@@ -428,6 +428,78 @@ async function monitorTpSl(
   }
 }
 
+// ── Market sell helper ────────────────────────────────────────────────────
+
+/**
+ * Executes an immediate market sell of all tokens for a position via Li.Fi.
+ * Updates the trade record to "sold" on success.
+ */
+async function runMarketSell(
+  tradeId: number,
+  tokenAddress: Address,
+  rawBal: bigint,
+  buyAmountEth: string,
+): Promise<void> {
+  const publicClient = makePublicClient();
+  const account = privateKeyToAccount(getWalletKey());
+  const walletClient = createWalletClient({ account, chain: base, transport: http(getHttpRpcUrl()) });
+
+  try {
+    const sellQuote = await getLiFiQuote(
+      tokenAddress,
+      ETH_ADDRESS,
+      rawBal,
+      account.address,
+      10, // 10% slippage for market sell
+    );
+
+    if (sellQuote.estimate.approvalAddress) {
+      await ensureApproval(
+        publicClient,
+        walletClient,
+        account.address,
+        tokenAddress,
+        sellQuote.estimate.approvalAddress as Address,
+        rawBal,
+      );
+    }
+
+    const { transactionRequest: sellTx } = sellQuote;
+    const hash = await walletClient.sendTransaction({
+      to: sellTx.to as Address,
+      data: sellTx.data as `0x${string}`,
+      value: BigInt(sellTx.value || "0"),
+      gas: sellTx.gasLimit ? BigInt(sellTx.gasLimit) : undefined,
+      account,
+      chain: base,
+    });
+
+    const receipt = await publicClient.waitForTransactionReceipt({ hash });
+    if (receipt.status === "success") {
+      const ethRecovered = sellQuote.estimate.toAmountMin
+        ? formatEther(BigInt(sellQuote.estimate.toAmountMin))
+        : "0";
+      const pnl = (parseFloat(ethRecovered) - parseFloat(buyAmountEth)).toFixed(6);
+
+      await db
+        .update(tradesTable)
+        .set({ status: "sold", sellTxHash: hash, sellAmountEth: ethRecovered, pnlEth: pnl })
+        .where(eq(tradesTable.id, tradeId));
+
+      logger.info({ tradeId, pnl, ethRecovered, hash }, "Market sell confirmed via Li.Fi");
+    } else {
+      throw new Error("Market sell tx reverted on-chain");
+    }
+  } catch (err) {
+    const failReason = (err instanceof Error ? err.message : String(err)).slice(0, 500);
+    logger.error({ err, tradeId, failReason }, "Market sell failed");
+    await db
+      .update(tradesTable)
+      .set({ status: "confirmed", failReason })
+      .where(eq(tradesTable.id, tradeId));
+  }
+}
+
 // ── Routes ─────────────────────────────────────────────────────────────────
 
 const ManualBuyBody = z.object({
@@ -747,6 +819,104 @@ router.get("/positions", async (_req, res): Promise<void> => {
   );
 
   res.json(positions);
+});
+
+// ── Market sell ────────────────────────────────────────────────────────────
+
+router.post("/positions/:id/sell", async (req, res): Promise<void> => {
+  const id = parseInt(req.params.id, 10);
+  if (isNaN(id)) { res.status(400).json({ error: "Invalid id" }); return; }
+
+  const [trade] = await db
+    .select()
+    .from(tradesTable)
+    .where(and(eq(tradesTable.id, id), eq(tradesTable.source, "manual"), eq(tradesTable.status, "confirmed")));
+
+  if (!trade) { res.status(404).json({ error: "Position not found or already closed" }); return; }
+
+  const addr = trade.tokenAddress as Address;
+  const publicClient = makePublicClient();
+
+  let walletAddress: Address;
+  try {
+    walletAddress = privateKeyToAccount(getWalletKey()).address;
+  } catch {
+    res.status(500).json({ error: "Wallet not configured" });
+    return;
+  }
+
+  let rawBal: bigint;
+  try {
+    rawBal = await publicClient.readContract({
+      address: addr,
+      abi: ERC20_ABI,
+      functionName: "balanceOf",
+      args: [walletAddress],
+    });
+  } catch {
+    res.status(500).json({ error: "Failed to read token balance" });
+    return;
+  }
+
+  if (rawBal === 0n) {
+    res.status(400).json({ error: "No token balance to sell" });
+    return;
+  }
+
+  // Respond immediately; sell executes in background
+  res.status(202).json(trade);
+
+  runMarketSell(trade.id, addr, rawBal, trade.buyAmountEth ?? "0").catch((err) =>
+    logger.error({ err, tradeId: trade.id }, "Market sell background error"),
+  );
+});
+
+// ── Update TP/SL ───────────────────────────────────────────────────────────
+
+const UpdateTpSlBody = z.object({
+  takeProfitPercent: z.number().min(0).max(10000).nullable().optional(),
+  stopLossPercent: z.number().min(0).max(100).nullable().optional(),
+});
+
+router.put("/positions/:id/tpsl", async (req, res): Promise<void> => {
+  const id = parseInt(req.params.id, 10);
+  if (isNaN(id)) { res.status(400).json({ error: "Invalid id" }); return; }
+
+  const parsed = UpdateTpSlBody.safeParse(req.body);
+  if (!parsed.success) { res.status(400).json({ error: "Invalid input", details: parsed.error.issues }); return; }
+
+  const [trade] = await db
+    .select()
+    .from(tradesTable)
+    .where(and(eq(tradesTable.id, id), eq(tradesTable.source, "manual"), eq(tradesTable.status, "confirmed")));
+
+  if (!trade) { res.status(404).json({ error: "Position not found or already closed" }); return; }
+
+  const { takeProfitPercent, stopLossPercent } = parsed.data;
+
+  const [updated] = await db
+    .update(tradesTable)
+    .set({
+      takeProfitPercent: takeProfitPercent != null ? takeProfitPercent.toString() : null,
+      stopLossPercent: stopLossPercent != null ? stopLossPercent.toString() : null,
+    })
+    .where(eq(tradesTable.id, id))
+    .returning();
+
+  res.json(updated);
+
+  // Start/restart TP/SL monitor with new values
+  const entryPrice = updated.entryPriceEth ? parseFloat(updated.entryPriceEth) : 0;
+  if ((takeProfitPercent || stopLossPercent) && entryPrice > 0) {
+    monitorTpSl(
+      updated.id,
+      updated.tokenAddress as Address,
+      entryPrice,
+      takeProfitPercent ?? null,
+      stopLossPercent ?? null,
+      updated.buyAmountEth ?? "0",
+    ).catch((err) => logger.error({ err, tradeId: updated.id }, "TP/SL monitor restart error"));
+  }
 });
 
 // ── Manual trades list ─────────────────────────────────────────────────────

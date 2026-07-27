@@ -261,6 +261,60 @@ paths:
                 items:
                   $ref: "#/components/schemas/Position"
 
+  /positions/{id}/sell:
+    post:
+      operationId: marketSell
+      tags: [manual]
+      summary: Market sell all tokens for a position immediately via Li.Fi
+      parameters:
+        - name: id
+          in: path
+          required: true
+          schema:
+            type: integer
+      responses:
+        "202":
+          description: Sell submitted (executes in background)
+          content:
+            application/json:
+              schema:
+                $ref: "#/components/schemas/Trade"
+        "400":
+          description: No balance to sell
+        "404":
+          description: Position not found or already closed
+        "500":
+          description: Wallet not configured
+
+  /positions/{id}/tpsl:
+    put:
+      operationId: updateTpSl
+      tags: [manual]
+      summary: Update take profit / stop loss for an open position
+      parameters:
+        - name: id
+          in: path
+          required: true
+          schema:
+            type: integer
+      requestBody:
+        required: true
+        content:
+          application/json:
+            schema:
+              $ref: "#/components/schemas/UpdateTpSlRequest"
+      responses:
+        "200":
+          description: Updated trade record
+          content:
+            application/json:
+              schema:
+                $ref: "#/components/schemas/Trade"
+        "400":
+          description: Invalid input
+        "404":
+          description: Position not found or already closed
+
   /token/{address}:
     get:
       operationId: getTokenInfo
@@ -516,6 +570,16 @@ components:
           type: ["string", "null"]
         blockNumber:
           type: ["integer", "null"]
+
+    UpdateTpSlRequest:
+      type: object
+      properties:
+        takeProfitPercent:
+          type: ["number", "null"]
+          description: New take profit % (null to disable)
+        stopLossPercent:
+          type: ["number", "null"]
+          description: New stop loss % (null to disable)
 
     ManualBuyRequest:
       type: object

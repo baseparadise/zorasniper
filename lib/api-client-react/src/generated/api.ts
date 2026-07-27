@@ -33,7 +33,8 @@ import type {
   Position,
   TokenInfo,
   Trade,
-  TradeStats
+  TradeStats,
+  UpdateTpSlRequest
 } from './api.schemas';
 
 import { customFetch } from '../custom-fetch';
@@ -1106,6 +1107,149 @@ export function useListPositions<TData = Awaited<ReturnType<typeof listPositions
 
 
 
+
+export const getMarketSellUrl = (id: number,) => {
+
+
+
+
+  return `/api/positions/${id}/sell`
+}
+
+/**
+ * @summary Market sell all tokens for a position immediately via Li.Fi
+ */
+export const marketSell = async (id: number, options?: RequestInit): Promise<Trade> => {
+
+  return customFetch<Trade>(getMarketSellUrl(id),
+  {
+    ...options,
+    method: 'POST'
+
+
+  }
+);}
+
+
+
+
+
+export const getMarketSellMutationOptions = <TError = ErrorType<void>,
+    TContext = unknown>(options?: { mutation?:UseMutationOptions<Awaited<ReturnType<typeof marketSell>>, TError,{id: number}, TContext>, request?: SecondParameter<typeof customFetch>}
+): UseMutationOptions<Awaited<ReturnType<typeof marketSell>>, TError,{id: number}, TContext> => {
+
+const mutationKey = ['marketSell'];
+const {mutation: mutationOptions, request: requestOptions} = options ?
+      options.mutation && 'mutationKey' in options.mutation && options.mutation.mutationKey ?
+      options
+      : {...options, mutation: {...options.mutation, mutationKey}}
+      : {mutation: { mutationKey, }, request: undefined};
+
+
+
+
+      const mutationFn: MutationFunction<Awaited<ReturnType<typeof marketSell>>, {id: number}> = (props) => {
+          const {id} = props ?? {};
+
+          return  marketSell(id,requestOptions)
+        }
+
+
+
+
+
+
+  return  { mutationFn, ...mutationOptions }}
+
+    export type MarketSellMutationResult = NonNullable<Awaited<ReturnType<typeof marketSell>>>
+
+    export type MarketSellMutationError = ErrorType<void>
+
+    /**
+ * @summary Market sell all tokens for a position immediately via Li.Fi
+ */
+export const useMarketSell = <TError = ErrorType<void>,
+    TContext = unknown>(options?: { mutation?:UseMutationOptions<Awaited<ReturnType<typeof marketSell>>, TError,{id: number}, TContext>, request?: SecondParameter<typeof customFetch>}
+ ): UseMutationResult<
+        Awaited<ReturnType<typeof marketSell>>,
+        TError,
+        {id: number},
+        TContext
+      > => {
+      return useMutation(getMarketSellMutationOptions(options));
+    }
+
+export const getUpdateTpSlUrl = (id: number,) => {
+
+
+
+
+  return `/api/positions/${id}/tpsl`
+}
+
+/**
+ * @summary Update take profit / stop loss for an open position
+ */
+export const updateTpSl = async (id: number,
+    updateTpSlRequest: UpdateTpSlRequest, options?: RequestInit): Promise<Trade> => {
+
+  return customFetch<Trade>(getUpdateTpSlUrl(id),
+  {
+    ...options,
+    method: 'PUT',
+    headers: { 'Content-Type': 'application/json', ...options?.headers },
+    body: JSON.stringify(updateTpSlRequest)
+  }
+);}
+
+
+
+
+
+export const getUpdateTpSlMutationOptions = <TError = ErrorType<void>,
+    TContext = unknown>(options?: { mutation?:UseMutationOptions<Awaited<ReturnType<typeof updateTpSl>>, TError,{id: number;data: BodyType<UpdateTpSlRequest>}, TContext>, request?: SecondParameter<typeof customFetch>}
+): UseMutationOptions<Awaited<ReturnType<typeof updateTpSl>>, TError,{id: number;data: BodyType<UpdateTpSlRequest>}, TContext> => {
+
+const mutationKey = ['updateTpSl'];
+const {mutation: mutationOptions, request: requestOptions} = options ?
+      options.mutation && 'mutationKey' in options.mutation && options.mutation.mutationKey ?
+      options
+      : {...options, mutation: {...options.mutation, mutationKey}}
+      : {mutation: { mutationKey, }, request: undefined};
+
+
+
+
+      const mutationFn: MutationFunction<Awaited<ReturnType<typeof updateTpSl>>, {id: number;data: BodyType<UpdateTpSlRequest>}> = (props) => {
+          const {id,data} = props ?? {};
+
+          return  updateTpSl(id,data,requestOptions)
+        }
+
+
+
+
+
+
+  return  { mutationFn, ...mutationOptions }}
+
+    export type UpdateTpSlMutationResult = NonNullable<Awaited<ReturnType<typeof updateTpSl>>>
+    export type UpdateTpSlMutationBody = BodyType<UpdateTpSlRequest>
+    export type UpdateTpSlMutationError = ErrorType<void>
+
+    /**
+ * @summary Update take profit / stop loss for an open position
+ */
+export const useUpdateTpSl = <TError = ErrorType<void>,
+    TContext = unknown>(options?: { mutation?:UseMutationOptions<Awaited<ReturnType<typeof updateTpSl>>, TError,{id: number;data: BodyType<UpdateTpSlRequest>}, TContext>, request?: SecondParameter<typeof customFetch>}
+ ): UseMutationResult<
+        Awaited<ReturnType<typeof updateTpSl>>,
+        TError,
+        {id: number;data: BodyType<UpdateTpSlRequest>},
+        TContext
+      > => {
+      return useMutation(getUpdateTpSlMutationOptions(options));
+    }
 
 export const getGetTokenInfoUrl = (address: string,) => {
 

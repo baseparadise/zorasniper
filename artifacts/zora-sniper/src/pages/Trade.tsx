@@ -4,14 +4,16 @@ import {
   useManualBuy,
   useListPositions,
   useGetTokenInfo,
+  useMarketSell,
+  useUpdateTpSl,
   getListPositionsQueryKey,
 } from "@workspace/api-client-react";
 import { useToast } from "@/hooks/use-toast";
 import { cn, formatEth, formatAddress, getBasescanTxLink, getBasescanAddressLink, getZoraTokenLink } from "@/lib/utils";
 import {
   ShoppingCart, TrendingUp, TrendingDown, ExternalLink,
-  Loader2, Target, ShieldAlert, RefreshCw, Crosshair,
-  AlertCircle, CheckCircle2, Clock,
+  Loader2, Target, ShieldAlert, RefreshCw,
+  AlertCircle, CheckCircle2, Clock, Pencil, X, Check, DollarSign,
 } from "lucide-react";
 import zoraLogo from "@/assets/zora-logo.png";
 import basescanLogo from "@/assets/basescan-logo.png";
@@ -94,7 +96,7 @@ function TokenPreview({ address }: { address: string }) {
 
 // ── Position card ──────────────────────────────────────────────────────────
 
-function PositionCard({ position }: { position: any }) {
+function PositionCard({ position, onRefresh }: { position: any; onRefresh: () => void }) {
   const { trade, currentBalanceTokens, currentValueEth, pnlPercent, entryPriceEth } = position;
   const pnlPositive = pnlPercent > 0;
   const pnlZero = pnlPercent === 0;
@@ -102,6 +104,75 @@ function PositionCard({ position }: { position: any }) {
   const tpNum = trade.takeProfitPercent ? parseFloat(trade.takeProfitPercent) : null;
   const slNum = trade.stopLossPercent ? parseFloat(trade.stopLossPercent) : null;
   const balNum = parseFloat(currentBalanceTokens);
+
+  // Sell confirmation state: idle → confirm → selling
+  const [sellState, setSellState] = useState<"idle" | "confirm">("idle");
+
+  // Edit TP/SL state
+  const [editingTpSl, setEditingTpSl] = useState(false);
+  const [tpInput, setTpInput] = useState(tpNum != null ? String(tpNum) : "");
+  const [slInput, setSlInput] = useState(slNum != null ? String(slNum) : "");
+
+  const { toast } = useToast();
+  const queryClient = useQueryClient();
+
+  const marketSell = useMarketSell({
+    mutation: {
+      onSuccess: () => {
+        toast({ title: "Sell submitted", description: `${trade.tokenSymbol} — selling at market` });
+        setSellState("idle");
+        setTimeout(() => {
+          queryClient.invalidateQueries({ queryKey: getListPositionsQueryKey() });
+          onRefresh();
+        }, 3000);
+      },
+      onError: (err: any) => {
+        toast({ title: "Sell failed", description: err?.message ?? "Unknown error", variant: "destructive" });
+        setSellState("idle");
+      },
+    },
+  });
+
+  const updateTpSl = useUpdateTpSl({
+    mutation: {
+      onSuccess: () => {
+        toast({ title: "TP/SL updated", description: `${trade.tokenSymbol} — monitor restarted` });
+        setEditingTpSl(false);
+        queryClient.invalidateQueries({ queryKey: getListPositionsQueryKey() });
+        onRefresh();
+      },
+      onError: (err: any) => {
+        toast({ title: "Update failed", description: err?.message ?? "Unknown error", variant: "destructive" });
+      },
+    },
+  });
+
+  const handleSell = () => {
+    if (sellState === "idle") {
+      setSellState("confirm");
+      return;
+    }
+    marketSell.mutate({ id: trade.id });
+  };
+
+  const handleSaveTpSl = () => {
+    updateTpSl.mutate({
+      id: trade.id,
+      data: {
+        takeProfitPercent: tpInput ? parseFloat(tpInput) : null,
+        stopLossPercent: slInput ? parseFloat(slInput) : null,
+      },
+    });
+  };
+
+  const handleCancelEdit = () => {
+    setTpInput(tpNum != null ? String(tpNum) : "");
+    setSlInput(slNum != null ? String(slNum) : "");
+    setEditingTpSl(false);
+  };
+
+  const isSelling = marketSell.isPending;
+  const isSavingTpSl = updateTpSl.isPending;
 
   return (
     <div className="rounded-2xl border border-white/8 bg-white/[0.03] p-4 space-y-3 hover:border-white/12 transition-all">
@@ -165,7 +236,7 @@ function PositionCard({ position }: { position: any }) {
         </div>
       </div>
 
-      {/* Balance + TP/SL */}
+      {/* Balance + TP/SL badges */}
       <div className="flex items-center justify-between gap-2">
         <div className="text-[11px] text-white/35 font-mono">
           {balNum > 0 ? balNum.toLocaleString(undefined, { maximumFractionDigits: 0 }) : "0"} tokens held
@@ -185,6 +256,118 @@ function PositionCard({ position }: { position: any }) {
           )}
         </div>
       </div>
+
+      {/* ── Edit TP/SL panel ── */}
+      {editingTpSl && (
+        <div className="rounded-xl border border-violet-500/20 bg-violet-500/5 p-3 space-y-3">
+          <p className="text-violet-300 text-[11px] font-semibold uppercase tracking-wider">Edit TP / SL</p>
+          <div className="grid grid-cols-2 gap-2">
+            <div>
+              <label className="text-white/40 text-[10px] uppercase tracking-wider block mb-1">
+                Take Profit %
+              </label>
+              <input
+                type="number"
+                min="0"
+                step="5"
+                placeholder="e.g. 50"
+                value={tpInput}
+                onChange={(e) => setTpInput(e.target.value)}
+                className="w-full h-8 rounded-lg bg-white/5 border border-white/10 text-white text-xs font-mono px-2 outline-none focus:border-violet-500/50 placeholder-white/20"
+              />
+            </div>
+            <div>
+              <label className="text-white/40 text-[10px] uppercase tracking-wider block mb-1">
+                Stop Loss %
+              </label>
+              <input
+                type="number"
+                min="0"
+                max="100"
+                step="5"
+                placeholder="e.g. 20"
+                value={slInput}
+                onChange={(e) => setSlInput(e.target.value)}
+                className="w-full h-8 rounded-lg bg-white/5 border border-white/10 text-white text-xs font-mono px-2 outline-none focus:border-violet-500/50 placeholder-white/20"
+              />
+            </div>
+          </div>
+          <div className="flex items-center gap-2">
+            <button
+              onClick={handleSaveTpSl}
+              disabled={isSavingTpSl}
+              className="flex-1 h-8 rounded-lg bg-violet-600/40 hover:bg-violet-600/60 border border-violet-500/30 text-violet-200 text-xs font-semibold flex items-center justify-center gap-1.5 transition-all disabled:opacity-50"
+            >
+              {isSavingTpSl ? (
+                <Loader2 className="w-3 h-3 animate-spin" />
+              ) : (
+                <Check className="w-3 h-3" />
+              )}
+              Save
+            </button>
+            <button
+              onClick={handleCancelEdit}
+              disabled={isSavingTpSl}
+              className="h-8 px-3 rounded-lg bg-white/5 hover:bg-white/10 border border-white/10 text-white/40 text-xs flex items-center gap-1.5 transition-all"
+            >
+              <X className="w-3 h-3" />
+              Cancel
+            </button>
+          </div>
+        </div>
+      )}
+
+      {/* ── Action buttons ── */}
+      <div className="flex items-center gap-2">
+        {/* Edit TP/SL button */}
+        <button
+          onClick={() => { setEditingTpSl((v) => !v); setSellState("idle"); }}
+          disabled={isSelling}
+          className={cn(
+            "flex-1 h-9 rounded-xl border text-xs font-semibold flex items-center justify-center gap-1.5 transition-all",
+            editingTpSl
+              ? "bg-violet-600/20 border-violet-500/40 text-violet-300"
+              : "bg-white/5 border-white/10 text-white/50 hover:text-white/80 hover:border-white/20"
+          )}
+        >
+          <Pencil className="w-3 h-3" />
+          {tpNum != null || slNum != null ? "Edit TP/SL" : "Set TP/SL"}
+        </button>
+
+        {/* Sell Market button — two-step confirm */}
+        {sellState === "idle" ? (
+          <button
+            onClick={handleSell}
+            disabled={isSelling || balNum === 0}
+            className="flex-1 h-9 rounded-xl bg-red-600/20 hover:bg-red-600/35 border border-red-500/30 text-red-300 text-xs font-semibold flex items-center justify-center gap-1.5 transition-all disabled:opacity-40 disabled:cursor-not-allowed"
+          >
+            <DollarSign className="w-3 h-3" />
+            Sell Market
+          </button>
+        ) : (
+          <div className="flex-1 flex items-center gap-1.5">
+            <button
+              onClick={handleSell}
+              disabled={isSelling}
+              className="flex-1 h-9 rounded-xl bg-red-600/70 hover:bg-red-600/90 border border-red-500/60 text-white text-xs font-bold flex items-center justify-center gap-1.5 transition-all disabled:opacity-50 animate-pulse"
+            >
+              {isSelling ? (
+                <Loader2 className="w-3 h-3 animate-spin" />
+              ) : (
+                <Check className="w-3 h-3" />
+              )}
+              {isSelling ? "Selling..." : "Confirm Sell"}
+            </button>
+            <button
+              onClick={() => setSellState("idle")}
+              disabled={isSelling}
+              className="h-9 px-2.5 rounded-xl bg-white/5 hover:bg-white/10 border border-white/10 text-white/40 flex items-center transition-all"
+            >
+              <X className="w-3.5 h-3.5" />
+            </button>
+          </div>
+        )}
+      </div>
     </div>
   );
 }
@@ -198,30 +381,14 @@ function StatusPill({ status }: { status: string }) {
   const cfg = map[status] ?? map.pending;
   const Icon = cfg.icon;
   return (
-    <span className={cn("flex items-center gap-1 text-[10px] font-bold px-2 py-0.5 rounded-full border uppercase tracking-wide shrink-0", cfg.cls)}>
+    <span className={cn("inline-flex items-center gap-1 px-1.5 py-0.5 rounded-md border text-[9px] font-bold tracking-wider", cfg.cls)}>
       <Icon className="w-2.5 h-2.5" />
       {cfg.label}
     </span>
   );
 }
 
-// ── Input component ────────────────────────────────────────────────────────
-
-function Field({ label, desc, children }: { label: string; desc?: string; children: React.ReactNode }) {
-  return (
-    <div>
-      <label className="block text-white/60 text-xs font-semibold uppercase tracking-wider mb-1.5">
-        {label}
-        {desc && <span className="text-white/25 normal-case tracking-normal ml-1.5 font-normal">{desc}</span>}
-      </label>
-      {children}
-    </div>
-  );
-}
-
-const inputCls = "w-full bg-white/[0.07] border border-white/15 rounded-xl text-white placeholder-white/20 text-sm h-11 px-3.5 focus:outline-none focus:ring-1 focus:ring-violet-500/40 focus:border-violet-400/50 font-mono transition-all";
-
-// ── Main page ──────────────────────────────────────────────────────────────
+// ── Main Trade page ────────────────────────────────────────────────────────
 
 export default function Trade() {
   const { toast } = useToast();
@@ -267,7 +434,6 @@ export default function Trade() {
         onSuccess: (trade) => {
           toast({ title: "Buy submitted", description: `${trade.tokenSymbol} — ${ethAmount} ETH pending confirmation` });
           queryClient.invalidateQueries({ queryKey: getListPositionsQueryKey() });
-          // reset CA
           setCa("");
           setDebouncedCa("");
         },
@@ -279,12 +445,13 @@ export default function Trade() {
   };
 
   return (
-    <div className="px-4 py-4 space-y-5">
-      {/* ── Buy form ── */}
-      <div className="rounded-2xl border border-white/8 bg-white/[0.03] p-4 space-y-4">
-        <div className="flex items-center gap-2 mb-1">
-          <div className="w-8 h-8 rounded-xl bg-violet-600/20 border border-violet-500/20 flex items-center justify-center">
-            <Crosshair className="w-4 h-4 text-violet-400" />
+    <div className="space-y-4">
+      {/* ── Manual Buy form ── */}
+      <div className="rounded-2xl border border-white/8 bg-white/[0.02] p-4 space-y-4">
+        {/* Header */}
+        <div className="flex items-center gap-3">
+          <div className="w-9 h-9 rounded-xl bg-violet-600/20 border border-violet-500/20 flex items-center justify-center">
+            <ShoppingCart className="w-4 h-4 text-violet-400" />
           </div>
           <div>
             <p className="text-white font-semibold text-sm">Manual Buy</p>
@@ -292,70 +459,84 @@ export default function Trade() {
           </div>
         </div>
 
-        {/* Contract Address */}
-        <Field label="Contract Address" desc="CA of the Zora token">
+        {/* Contract address */}
+        <div>
+          <label className="text-white/40 text-[10px] uppercase tracking-wider block mb-1.5">
+            Contract Address <span className="text-white/20">CA of the Zora token</span>
+          </label>
           <input
-            className={inputCls}
+            type="text"
             placeholder="0x..."
             value={ca}
             onChange={(e) => setCa(e.target.value)}
+            className="w-full h-10 rounded-xl bg-white/5 border border-white/10 text-white text-sm font-mono px-3 outline-none focus:border-violet-500/50 placeholder-white/15 transition-all"
           />
-        </Field>
+        </div>
 
         {/* Token preview */}
         {debouncedCa && <TokenPreview address={debouncedCa} />}
 
-        {/* ETH + Slippage */}
+        {/* Buy amount + slippage */}
         <div className="grid grid-cols-2 gap-3">
-          <Field label="Buy Amount" desc="ETH">
+          <div>
+            <label className="text-white/40 text-[10px] uppercase tracking-wider block mb-1.5">
+              Buy Amount <span className="text-white/20">ETH</span>
+            </label>
             <input
-              className={inputCls}
               type="number"
               min="0"
               step="0.001"
-              placeholder="0.01"
               value={ethAmount}
               onChange={(e) => setEthAmount(e.target.value)}
+              className="w-full h-10 rounded-xl bg-white/5 border border-white/10 text-white text-sm font-mono px-3 outline-none focus:border-violet-500/50 transition-all"
             />
-          </Field>
-          <Field label="Slippage" desc="%">
+          </div>
+          <div>
+            <label className="text-white/40 text-[10px] uppercase tracking-wider block mb-1.5">
+              Slippage <span className="text-white/20">%</span>
+            </label>
             <input
-              className={inputCls}
               type="number"
               min="0"
-              max="100"
-              step="0.5"
-              placeholder="5"
+              max="50"
+              step="1"
               value={slippage}
               onChange={(e) => setSlippage(e.target.value)}
+              className="w-full h-10 rounded-xl bg-white/5 border border-white/10 text-white text-sm font-mono px-3 outline-none focus:border-violet-500/50 transition-all"
             />
-          </Field>
+          </div>
         </div>
 
         {/* TP / SL */}
         <div className="grid grid-cols-2 gap-3">
-          <Field label="Take Profit" desc="% (optional)">
+          <div>
+            <label className="text-white/40 text-[10px] uppercase tracking-wider block mb-1.5">
+              Take Profit <span className="text-white/20">% (optional)</span>
+            </label>
             <input
-              className={cn(inputCls, "text-green-400 placeholder-green-900")}
               type="number"
               min="0"
               step="5"
               placeholder="e.g. 50"
               value={tp}
               onChange={(e) => setTp(e.target.value)}
+              className="w-full h-10 rounded-xl bg-white/5 border border-white/10 text-white text-sm font-mono px-3 outline-none focus:border-green-500/40 placeholder-white/15 transition-all"
             />
-          </Field>
-          <Field label="Stop Loss" desc="% (optional)">
+          </div>
+          <div>
+            <label className="text-white/40 text-[10px] uppercase tracking-wider block mb-1.5">
+              Stop Loss <span className="text-white/20">% (optional)</span>
+            </label>
             <input
-              className={cn(inputCls, "text-red-400 placeholder-red-900")}
               type="number"
               min="0"
               step="5"
               placeholder="e.g. 20"
               value={sl}
               onChange={(e) => setSl(e.target.value)}
+              className="w-full h-10 rounded-xl bg-white/5 border border-white/10 text-white text-sm font-mono px-3 outline-none focus:border-red-500/40 placeholder-white/15 transition-all"
             />
-          </Field>
+          </div>
         </div>
 
         {/* Quick slippage presets */}
@@ -427,7 +608,7 @@ export default function Trade() {
         ) : (
           <div className="space-y-3">
             {positions.map((pos: any) => (
-              <PositionCard key={pos.trade.id} position={pos} />
+              <PositionCard key={pos.trade.id} position={pos} onRefresh={() => refetchPositions()} />
             ))}
           </div>
         )}

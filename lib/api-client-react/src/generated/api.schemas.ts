@@ -215,6 +215,19 @@ export interface Trade {
   blockNumber?: number | null;
 }
 
+export interface UpdateTpSlRequest {
+  /**
+     * New take profit % (null to disable)
+     * @nullable
+     */
+  takeProfitPercent?: number | null;
+  /**
+     * New stop loss % (null to disable)
+     * @nullable
+     */
+  stopLossPercent?: number | null;
+}
+
 export interface ManualBuyRequest {
   /** EVM contract address of the Zora token to buy */
   tokenAddress: string;
