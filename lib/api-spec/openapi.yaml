@@ -233,7 +233,7 @@ paths:
         content:
           application/json:
             schema:
-              $ref: "#/components/schemas/ManualBuyBody"
+              $ref: "#/components/schemas/ManualBuyRequest"
       responses:
         "201":
           description: Trade created (pending — tx executes in background)
@@ -517,7 +517,7 @@ components:
         blockNumber:
           type: ["integer", "null"]
 
-    ManualBuyBody:
+    ManualBuyRequest:
       type: object
       required:
         - tokenAddress
