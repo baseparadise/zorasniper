@@ -24,7 +24,7 @@ const ZERO_ADDRESS = "0x0000000000000000000000000000000000000000" as Address;
 // Native ETH pseudo-address used by Li.Fi
 const ETH_ADDRESS = "0x0000000000000000000000000000000000000000" as Address;
 const BASE_CHAIN_ID = 8453;
-const LIFI_INTEGRATOR = "bpai"; // your Li.Fi integration ID
+const LIFI_INTEGRATOR = "zorasniper001"; // Li.Fi integration ID
 
 // ── ABI definitions ────────────────────────────────────────────────────────
 
@@ -108,7 +108,10 @@ async function getLiFiQuote(
   logger.info({ url }, "Fetching Li.Fi quote");
 
   const res = await fetch(url, {
-    headers: { Accept: "application/json" },
+    headers: {
+      Accept: "application/json",
+      ...(process.env.LIFI_API_KEY ? { "x-lifi-api-key": process.env.LIFI_API_KEY } : {}),
+    },
     signal: AbortSignal.timeout(15_000),
   });
 
