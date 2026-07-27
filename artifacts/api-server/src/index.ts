@@ -3,6 +3,7 @@ import app from "./app";
 import { logger } from "./lib/logger";
 import { startWsServer } from "./bot/ws";
 import { pool } from "@workspace/db";
+import { recoverTpSlMonitors } from './routes/manual';
 
 const rawPort = process.env["PORT"];
 
@@ -125,8 +126,13 @@ startWsServer(server);
 applyMigrations()
   .then(() => {
     server.listen(port, () => {
-      logger.info({ port }, "Server listening");
+      logger.info({ port }, 'Server listening');
     });
+
+    // Restart TP/SL monitors for any confirmed trades that survived a redeploy
+    recoverTpSlMonitors().catch((err) =>
+      logger.error({ err }, 'TP/SL startup recovery failed'),
+    );
 
     server.on("error", (err) => {
       logger.error({ err }, "Server error");
