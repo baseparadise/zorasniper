@@ -1,11 +1,12 @@
 import { Link, useLocation } from "wouter";
-import { Activity, Users, History, Settings, Zap } from "lucide-react";
+import { Activity, Users, History, Settings, Zap, ShoppingCart } from "lucide-react";
 import { cn } from "@/lib/utils";
 
 const NAV_ITEMS = [
   { href: "/", label: "Dashboard", icon: Activity },
+  { href: "/trade", label: "Trade", icon: ShoppingCart },
   { href: "/creators", label: "Creators", icon: Users },
-  { href: "/trades", label: "Trades", icon: History },
+  { href: "/trades", label: "History", icon: History },
   { href: "/settings", label: "Settings", icon: Settings },
 ];
 
@@ -47,7 +48,7 @@ export function Layout({ children }: { children: React.ReactNode }) {
         </div>
 
         {/* Tab bar — pill style */}
-        <div className="flex bg-white/5 rounded-2xl p-1 gap-1">
+        <div className="flex bg-white/5 rounded-2xl p-1 gap-0.5">
           {NAV_ITEMS.map((item) => {
             const isActive = location === item.href;
             return (
@@ -55,14 +56,14 @@ export function Layout({ children }: { children: React.ReactNode }) {
                 key={item.href}
                 href={item.href}
                 className={cn(
-                  "flex-1 flex items-center justify-center gap-1.5 py-2.5 rounded-xl text-xs font-semibold transition-all duration-200",
+                  "flex-1 flex items-center justify-center gap-1 py-2.5 rounded-xl text-[11px] font-semibold transition-all duration-200",
                   isActive
                     ? "bg-violet-600 text-white shadow-lg shadow-violet-500/20"
                     : "text-white/40 hover:text-white/70"
                 )}
               >
-                <item.icon className="h-3.5 w-3.5 shrink-0" />
-                {item.label}
+                <item.icon className="h-3 w-3 shrink-0" />
+                <span className="truncate">{item.label}</span>
               </Link>
             );
           })}

@@ -20,6 +20,8 @@ tags:
     description: Trade history
   - name: dashboard
     description: Dashboard overview
+  - name: manual
+    description: Manual trading
 paths:
   /healthz:
     get:
@@ -221,6 +223,67 @@ paths:
               schema:
                 $ref: "#/components/schemas/TradeStats"
 
+  /trades/manual-buy:
+    post:
+      operationId: manualBuy
+      tags: [manual]
+      summary: Execute a manual buy for a given token address
+      requestBody:
+        required: true
+        content:
+          application/json:
+            schema:
+              $ref: "#/components/schemas/ManualBuyBody"
+      responses:
+        "201":
+          description: Trade created (pending — tx executes in background)
+          content:
+            application/json:
+              schema:
+                $ref: "#/components/schemas/Trade"
+        "400":
+          description: Invalid input
+        "500":
+          description: Execution error
+
+  /positions:
+    get:
+      operationId: listPositions
+      tags: [manual]
+      summary: List open manual positions (manual buys not yet sold)
+      responses:
+        "200":
+          description: Open positions
+          content:
+            application/json:
+              schema:
+                type: array
+                items:
+                  $ref: "#/components/schemas/Position"
+
+  /token/{address}:
+    get:
+      operationId: getTokenInfo
+      tags: [manual]
+      summary: Get on-chain token info (name, symbol, price estimate, MC)
+      parameters:
+        - name: address
+          in: path
+          required: true
+          schema:
+            type: string
+      responses:
+        "200":
+          description: Token information
+          content:
+            application/json:
+              schema:
+                $ref: "#/components/schemas/TokenInfo"
+        "400":
+          description: Invalid address
+        "500":
+          description: RPC error
+
   /dashboard:
     get:
       operationId: getDashboard
@@ -354,16 +417,16 @@ components:
           description: Per-wallet max gas in Gwei. null = use global config
         autoSell:
           type: ["boolean", "null"]
-          description: Per-wallet auto-sell toggle. null = use global config
+          description: Per-wallet auto sell override. null = use global config
         takeProfitPercent:
           type: ["number", "null"]
-          description: Per-wallet take profit %. null = use global config
+          description: Per-wallet take profit %. null resets to global
         stopLossPercent:
           type: ["number", "null"]
-          description: Per-wallet stop loss %. null = use global config
+          description: Per-wallet stop loss %. null resets to global
         maxBuysPerDay:
           type: ["integer", "null"]
-          description: Per-wallet max buys per day. null = use global setting
+          description: Per-wallet max buys per day. null resets to global
 
     CreatorInput:
       type: object
@@ -371,10 +434,8 @@ components:
       properties:
         address:
           type: string
-          description: Ethereum address of the creator
         label:
           type: string
-          description: Optional display name/label
 
     CreatorPatch:
       type: object
@@ -385,16 +446,12 @@ components:
           type: boolean
         buyAmountEth:
           type: ["string", "null"]
-          description: Per-wallet ETH buy amount. null resets to global
         slippagePercent:
           type: ["number", "null"]
-          description: Per-wallet slippage %. null resets to global
         maxGasGwei:
           type: ["number", "null"]
-          description: Per-wallet max gas in Gwei. null resets to global
         autoSell:
           type: ["boolean", "null"]
-          description: Per-wallet auto-sell. null resets to global
         takeProfitPercent:
           type: ["number", "null"]
           description: Per-wallet take profit %. null resets to global
@@ -416,6 +473,7 @@ components:
         - buyAmountEth
         - timestamp
         - status
+        - source
       properties:
         id:
           type: integer
@@ -441,6 +499,15 @@ components:
         status:
           type: string
           enum: [pending, confirmed, failed, sold, skipped]
+        source:
+          type: string
+          enum: [sniper, manual]
+        takeProfitPercent:
+          type: ["string", "null"]
+        stopLossPercent:
+          type: ["string", "null"]
+        entryPriceEth:
+          type: ["string", "null"]
         sellTxHash:
           type: ["string", "null"]
         sellAmountEth:
@@ -449,6 +516,83 @@ components:
           type: ["string", "null"]
         blockNumber:
           type: ["integer", "null"]
+
+    ManualBuyBody:
+      type: object
+      required:
+        - tokenAddress
+        - buyAmountEth
+        - slippagePercent
+      properties:
+        tokenAddress:
+          type: string
+          description: EVM contract address of the Zora token to buy
+        buyAmountEth:
+          type: string
+          description: ETH amount to spend, e.g. "0.05"
+        slippagePercent:
+          type: number
+          description: Max slippage in percent, e.g. 5 = 5%
+        takeProfitPercent:
+          type: ["number", "null"]
+          description: Auto-sell when P&L reaches this %. null = disabled
+        stopLossPercent:
+          type: ["number", "null"]
+          description: Auto-sell when loss reaches this %. null = disabled
+
+    Position:
+      type: object
+      required:
+        - trade
+        - currentBalanceTokens
+        - entryPriceEth
+        - currentValueEth
+        - pnlPercent
+      properties:
+        trade:
+          $ref: "#/components/schemas/Trade"
+        currentBalanceTokens:
+          type: string
+          description: Current on-chain token balance for this wallet
+        entryPriceEth:
+          type: string
+          description: ETH paid per token at entry
+        currentValueEth:
+          type: string
+          description: Estimated current value in ETH (balance * current price)
+        pnlPercent:
+          type: number
+          description: Unrealised P&L in percent relative to entry
+
+    TokenInfo:
+      type: object
+      required:
+        - address
+        - name
+        - symbol
+        - totalSupply
+        - walletBalance
+        - priceEth
+        - mcEth
+      properties:
+        address:
+          type: string
+        name:
+          type: string
+        symbol:
+          type: string
+        totalSupply:
+          type: string
+          description: Human-readable total supply (18 decimals divided)
+        walletBalance:
+          type: string
+          description: Current wallet balance in tokens
+        priceEth:
+          type: string
+          description: Estimated ETH price per token (from small-buy simulation)
+        mcEth:
+          type: string
+          description: Estimated market cap in ETH
 
     TradeStats:
       type: object

@@ -19,6 +19,11 @@ export const tradesTable = pgTable("trades", {
   sellAmountEth: text("sell_amount_eth"),
   pnlEth: text("pnl_eth"),
   blockNumber: bigint("block_number", { mode: "number" }),
+  // Manual buy fields
+  source: text("source").notNull().default("sniper"), // 'sniper' | 'manual'
+  takeProfitPercent: text("take_profit_percent"),
+  stopLossPercent: text("stop_loss_percent"),
+  entryPriceEth: text("entry_price_eth"), // ETH per token at time of buy
 });
 
 export const insertTradeSchema = createInsertSchema(tradesTable).omit({

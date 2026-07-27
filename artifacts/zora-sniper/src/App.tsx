@@ -5,6 +5,7 @@ import { Layout } from '@/components/layout';
 import Dashboard from '@/pages/Dashboard';
 import Creators from '@/pages/Creators';
 import Trades from '@/pages/Trades';
+import Trade from '@/pages/Trade';
 import Settings from '@/pages/Settings';
 import NotFound from '@/pages/not-found';
 
@@ -15,6 +16,7 @@ function Router() {
     <Layout>
       <Switch>
         <Route path="/" component={Dashboard} />
+        <Route path="/trade" component={Trade} />
         <Route path="/creators" component={Creators} />
         <Route path="/trades" component={Trades} />
         <Route path="/settings" component={Settings} />
