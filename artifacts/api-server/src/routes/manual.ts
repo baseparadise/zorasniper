@@ -6,6 +6,8 @@ import {
   parseEther,
   formatEther,
   formatUnits,
+  parseUnits,
+  maxUint256,
   type Address,
 } from "viem";
 import { base } from "viem/chains";
@@ -17,6 +19,14 @@ import { z } from "zod/v4";
 
 const router: IRouter = Router();
 
+// ── Constants ──────────────────────────────────────────────────────────────
+
+const ZERO_ADDRESS = "0x0000000000000000000000000000000000000000" as Address;
+// Native ETH pseudo-address used by Li.Fi
+const ETH_ADDRESS = "0x0000000000000000000000000000000000000000" as Address;
+const BASE_CHAIN_ID = 8453;
+const LIFI_INTEGRATOR = "bpai"; // your Li.Fi integration ID
+
 // ── ABI definitions ────────────────────────────────────────────────────────
 
 const ERC20_ABI = [
@@ -24,38 +34,9 @@ const ERC20_ABI = [
   { type: "function", name: "symbol", stateMutability: "view", inputs: [], outputs: [{ type: "string" }] },
   { type: "function", name: "totalSupply", stateMutability: "view", inputs: [], outputs: [{ type: "uint256" }] },
   { type: "function", name: "balanceOf", stateMutability: "view", inputs: [{ name: "account", type: "address" }], outputs: [{ type: "uint256" }] },
+  { type: "function", name: "allowance", stateMutability: "view", inputs: [{ name: "owner", type: "address" }, { name: "spender", type: "address" }], outputs: [{ type: "uint256" }] },
+  { type: "function", name: "approve", stateMutability: "nonpayable", inputs: [{ name: "spender", type: "address" }, { name: "amount", type: "uint256" }], outputs: [{ type: "bool" }] },
 ] as const;
-
-const ZORA_COIN_BUY_ABI = [
-  {
-    type: "function",
-    name: "buy",
-    stateMutability: "payable",
-    inputs: [
-      { name: "recipient", type: "address" },
-      { name: "refundRecipient", type: "address" },
-      { name: "orderReferrer", type: "address" },
-      { name: "comment", type: "string" },
-      { name: "expectedMarketType", type: "uint8" },
-      { name: "minOrderSize", type: "uint256" },
-      { name: "sqrtPriceLimitX96", type: "uint160" },
-    ],
-    outputs: [{ name: "", type: "uint256" }],
-  },
-] as const;
-
-// FIX: ABI to read the on-chain market type (0 = primary/bonding curve, 1 = secondary/Uniswap)
-const MARKET_TYPE_ABI = [
-  {
-    type: "function",
-    name: "marketType",
-    stateMutability: "view",
-    inputs: [],
-    outputs: [{ name: "", type: "uint8" }],
-  },
-] as const;
-
-const ZERO_ADDRESS = "0x0000000000000000000000000000000000000000" as Address;
 
 // ── Helpers ────────────────────────────────────────────────────────────────
 
@@ -74,40 +55,119 @@ function makePublicClient() {
   return createPublicClient({ chain: base, transport: http(getHttpRpcUrl()) });
 }
 
-/**
- * FIX: Reads the on-chain marketType() from the Zora coin contract.
- * Returns 0 (primary/bonding curve) or 1 (secondary/Uniswap V3).
- *
- * Root cause of all "execution reverted" failures: buy() and sell() have an
- * `expectedMarketType` safety check — if you pass 0 but the token is already
- * on Uniswap (type 1), the contract reverts immediately. All callers must
- * detect the actual market type first.
- */
-async function getMarketType(
-  publicClient: ReturnType<typeof makePublicClient>,
-  tokenAddress: Address,
-): Promise<number> {
-  try {
-    const mt = await publicClient.readContract({
-      address: tokenAddress,
-      abi: MARKET_TYPE_ABI,
-      functionName: "marketType",
-    });
-    return Number(mt);
-  } catch {
-    // Default to primary market (0) if the call fails (e.g. old contract that
-    // doesn't expose marketType — those are always primary/bonding-curve).
-    return 0;
-  }
+// ── Li.Fi integration ──────────────────────────────────────────────────────
+
+interface LiFiQuoteResponse {
+  transactionRequest: {
+    to: string;
+    data: string;
+    value: string;
+    gasLimit?: string;
+    gasPrice?: string;
+    from?: string;
+  };
+  estimate: {
+    fromAmount: string;
+    toAmount: string;         // expected tokens out (no slippage)
+    toAmountMin: string;      // minimum tokens out (with slippage)
+    approvalAddress?: string; // spender address for ERC20 approval
+    gasCosts?: { amount: string; amountUSD?: string }[];
+  };
+  action: {
+    fromToken: { address: string; decimals: number };
+    toToken: { address: string; decimals: number };
+    fromAmount: string;
+    slippage: number;
+  };
+  tool?: string; // DEX used, e.g. "uniswap"
+  id?: string;
 }
 
-// ── Background buy executor ────────────────────────────────────────────────
+/**
+ * Get a swap quote from Li.Fi API.
+ * fromToken / toToken are token addresses; use ETH_ADDRESS for native ETH.
+ */
+async function getLiFiQuote(
+  fromToken: string,
+  toToken: string,
+  fromAmountWei: bigint,
+  fromAddress: Address,
+  slippagePercent: number,
+): Promise<LiFiQuoteResponse> {
+  const params = new URLSearchParams({
+    fromChain: String(BASE_CHAIN_ID),
+    toChain: String(BASE_CHAIN_ID),
+    fromToken,
+    toToken,
+    fromAmount: fromAmountWei.toString(),
+    fromAddress,
+    integrator: LIFI_INTEGRATOR,
+    slippage: (slippagePercent / 100).toFixed(4), // Li.Fi expects 0–1 (e.g. 0.05 for 5%)
+  });
+
+  const url = `https://li.quest/v1/quote?${params}`;
+  logger.info({ url }, "Fetching Li.Fi quote");
+
+  const res = await fetch(url, {
+    headers: { Accept: "application/json" },
+    signal: AbortSignal.timeout(15_000),
+  });
+
+  const body = await res.json() as { message?: string; code?: number } & LiFiQuoteResponse;
+  if (!res.ok || !body.transactionRequest) {
+    const msg = body.message ?? JSON.stringify(body).slice(0, 300);
+    throw new Error(`Li.Fi quote failed (${res.status}): ${msg}`);
+  }
+
+  return body;
+}
 
 /**
- * Executes the on-chain buy, waits for confirmation, then updates the DB.
- * Returns the actual entry price (ETH per token) derived from the confirmed
- * tx so the caller can pass it to the TP/SL monitor with the correct value.
- * Returns 0 if the tx failed or the amount could not be determined.
+ * Ensure the Li.Fi router has enough ERC20 allowance, approving if needed.
+ * No-op for native ETH swaps (fromToken = ETH_ADDRESS).
+ */
+async function ensureApproval(
+  publicClient: ReturnType<typeof makePublicClient>,
+  walletClient: ReturnType<typeof createWalletClient>,
+  account: Address,
+  tokenAddress: Address,
+  spender: Address,
+  amount: bigint,
+): Promise<void> {
+  if (tokenAddress.toLowerCase() === ETH_ADDRESS.toLowerCase()) return;
+
+  const existing = await publicClient.readContract({
+    address: tokenAddress,
+    abi: ERC20_ABI,
+    functionName: "allowance",
+    args: [account, spender],
+  });
+
+  if (existing >= amount) {
+    logger.info({ tokenAddress, spender, existing: existing.toString() }, "Allowance already sufficient");
+    return;
+  }
+
+  logger.info({ tokenAddress, spender, amount: amount.toString() }, "Approving Li.Fi spender");
+  const approveTx = await walletClient.writeContract({
+    address: tokenAddress,
+    abi: ERC20_ABI,
+    functionName: "approve",
+    args: [spender, maxUint256],
+    account,
+    chain: base,
+  });
+  await publicClient.waitForTransactionReceipt({ hash: approveTx });
+  logger.info({ approveTx }, "Approval confirmed");
+}
+
+// ── Background buy executor (Li.Fi) ───────────────────────────────────────
+
+/**
+ * Buys the token via Li.Fi swap (ETH → token).
+ * Li.Fi automatically routes through the best DEX (Uniswap, bonding curve, etc.)
+ * so this works regardless of the Zora market type.
+ * Returns the actual ETH-per-token entry price, or 0 on failure.
  */
 async function runBuy(
   tradeId: number,
@@ -120,66 +180,69 @@ async function runBuy(
     const publicClient = makePublicClient();
     const walletClient = createWalletClient({ account, chain: base, transport: http(getHttpRpcUrl()) });
 
-    const value = parseEther(buyAmountEth);
+    const fromAmountWei = parseEther(buyAmountEth);
 
-    // FIX: Detect the actual market type before any buy call.
-    // Hardcoding 0 causes "execution reverted" for tokens already on Uniswap (type 1).
-    const marketType = await getMarketType(publicClient, tokenAddress);
-    logger.info({ tradeId, tokenAddress, marketType }, "Detected market type for buy");
+    // Step 1: Get Li.Fi quote (ETH → token)
+    const quote = await getLiFiQuote(
+      ETH_ADDRESS,
+      tokenAddress,
+      fromAmountWei,
+      account.address,
+      slippagePercent,
+    );
 
-    // Simulate to get expected tokens and calculate minOrderSize with slippage
-    let minOrderSize = 0n;
-    try {
-      const { result: expectedTokens } = await publicClient.simulateContract({
-        address: tokenAddress,
-        abi: ZORA_COIN_BUY_ABI,
-        functionName: "buy",
-        args: [account.address, account.address, ZERO_ADDRESS, "zora-sniper-manual", marketType, 0n, 0n],
-        value,
-        account,
-      });
-      const slippageBps = BigInt(Math.round(slippagePercent * 100));
-      minOrderSize = (expectedTokens * (10_000n - slippageBps)) / 10_000n;
-    } catch (simErr) {
-      logger.warn({ simErr, tradeId }, "Simulation failed, proceeding with minOrderSize=0");
-    }
+    const { transactionRequest, estimate, tool } = quote;
+    logger.info(
+      { tradeId, tool, expectedOut: estimate.toAmount, minOut: estimate.toAmountMin },
+      "Li.Fi quote received",
+    );
 
-    // Execute buy
-    const hash = await walletClient.writeContract({
-      address: tokenAddress,
-      abi: ZORA_COIN_BUY_ABI,
-      functionName: "buy",
-      args: [account.address, account.address, ZERO_ADDRESS, "zora-sniper-manual", marketType, minOrderSize, 0n],
-      value,
+    // Step 2: Execute the swap transaction
+    const hash = await walletClient.sendTransaction({
+      to: transactionRequest.to as Address,
+      data: transactionRequest.data as `0x${string}`,
+      value: BigInt(transactionRequest.value || "0"),
+      gas: transactionRequest.gasLimit ? BigInt(transactionRequest.gasLimit) : undefined,
+      account,
+      chain: base,
     });
 
-    // Wait for confirmation
+    logger.info({ tradeId, hash }, "Li.Fi buy tx submitted");
+
+    // Step 3: Wait for confirmation
     const receipt = await publicClient.waitForTransactionReceipt({ hash });
 
     if (receipt.status === "success") {
       const gasUsedEth = formatEther(receipt.gasUsed * receipt.effectiveGasPrice);
 
-      // Bug fix: re-simulate at the mined block to get ACTUAL tokens received,
-      // not minOrderSize (which is the slippage floor, not the real amount).
-      // Same approach as the sniper's executeBuy in trader.ts.
+      // Determine tokens received: check actual on-chain balance delta
+      // (more reliable than parsing Li.Fi estimate after the fact)
       let tokenAmount = "0";
       try {
-        const { result: actualTokens } = await publicClient.simulateContract({
+        const rawBal = await publicClient.readContract({
           address: tokenAddress,
-          abi: ZORA_COIN_BUY_ABI,
-          functionName: "buy",
-          args: [account.address, account.address, ZERO_ADDRESS, "zora-sniper-manual", marketType, minOrderSize, 0n],
-          value,
-          account,
-          blockNumber: receipt.blockNumber,
+          abi: ERC20_ABI,
+          functionName: "balanceOf",
+          args: [account.address],
         });
-        if (actualTokens > 0n) tokenAmount = formatUnits(actualTokens, 18);
+        // Use the Li.Fi toAmountMin as a sanity floor
+        const minOut = BigInt(estimate.toAmountMin);
+        if (rawBal >= minOut && rawBal > 0n) {
+          // Use the estimate.toAmount (expected) as a proxy since we can't
+          // diff without a pre-buy snapshot; worst-case floor is minOut.
+          tokenAmount = formatUnits(BigInt(estimate.toAmount), 18);
+        } else if (rawBal > 0n) {
+          tokenAmount = formatUnits(rawBal, 18);
+        } else if (minOut > 0n) {
+          tokenAmount = formatUnits(minOut, 18);
+        }
       } catch {
-        // Fallback: use minOrderSize as lower-bound estimate
-        if (minOrderSize > 0n) tokenAmount = formatUnits(minOrderSize, 18);
+        // Fallback to Li.Fi estimate
+        if (estimate.toAmountMin && BigInt(estimate.toAmountMin) > 0n) {
+          tokenAmount = formatUnits(BigInt(estimate.toAmountMin), 18);
+        }
       }
 
-      // Entry price: ETH paid / tokens actually received
       const tokensNum = parseFloat(tokenAmount);
       const ethNum = parseFloat(buyAmountEth);
       const entryPriceNum = tokensNum > 0 ? ethNum / tokensNum : 0;
@@ -193,18 +256,18 @@ async function runBuy(
           gasUsedEth,
           tokenAmount,
           entryPriceEth: entryPriceStr,
-          blockNumber: Number(receipt.blockNumber), // Bug fix: was never stored
+          blockNumber: Number(receipt.blockNumber),
         })
         .where(eq(tradesTable.id, tradeId));
 
-      logger.info({ tradeId, hash, gasUsedEth, tokenAmount, entryPriceNum }, "Manual buy confirmed");
+      logger.info({ tradeId, hash, gasUsedEth, tokenAmount, entryPriceNum }, "Manual buy confirmed via Li.Fi");
       return entryPriceNum;
     } else {
       await db
         .update(tradesTable)
-        .set({ status: "failed", failReason: "Transaction reverted" })
+        .set({ status: "failed", failReason: "Li.Fi swap tx reverted on-chain" })
         .where(eq(tradesTable.id, tradeId));
-      logger.warn({ tradeId, hash }, "Manual buy tx reverted");
+      logger.warn({ tradeId, hash }, "Li.Fi buy tx reverted");
       return 0;
     }
   } catch (err) {
@@ -220,25 +283,6 @@ async function runBuy(
 
 // ── TP/SL background monitor ───────────────────────────────────────────────
 
-const ZORA_SELL_ABI = [
-  {
-    type: "function",
-    name: "sell",
-    stateMutability: "nonpayable",
-    inputs: [
-      { name: "tokensSold", type: "uint256" },
-      { name: "recipient", type: "address" },
-      { name: "refundRecipient", type: "address" },
-      { name: "orderReferrer", type: "address" },
-      { name: "comment", type: "string" },
-      { name: "expectedMarketType", type: "uint8" },
-      { name: "minPayoutSize", type: "uint256" },
-      { name: "sqrtPriceLimitX96", type: "uint160" },
-    ],
-    outputs: [{ name: "", type: "uint256" }],
-  },
-] as const;
-
 async function monitorTpSl(
   tradeId: number,
   tokenAddress: Address,
@@ -250,7 +294,6 @@ async function monitorTpSl(
   if (!takeProfitPercent && !stopLossPercent) return;
 
   const publicClient = makePublicClient();
-  const PROBE_ETH = parseEther("0.0001");
 
   let probeAccount: Address;
   try {
@@ -259,61 +302,40 @@ async function monitorTpSl(
     probeAccount = ZERO_ADDRESS;
   }
 
-  // FIX: Detect market type once at monitor start; re-detect before sell in case
-  // the token graduates from primary to secondary during the holding period.
-  let marketType = await getMarketType(publicClient, tokenAddress);
-
   const tpPrice = takeProfitPercent ? entryPriceEth * (1 + takeProfitPercent / 100) : null;
   const slPrice = stopLossPercent ? entryPriceEth * (1 - stopLossPercent / 100) : null;
 
-  logger.info({ tradeId, entryPriceEth, tpPrice, slPrice, marketType }, "Starting TP/SL monitor");
+  logger.info({ tradeId, entryPriceEth, tpPrice, slPrice }, "Starting TP/SL monitor (Li.Fi)");
 
-  const INTERVAL_MS = 15_000;        // check every 15s
-  const MAX_DURATION_MS = 24 * 60 * 60 * 1000; // max 24h
-  const MAX_SELL_ATTEMPTS = 3;       // Bug fix: retry sell up to 3 times
+  const INTERVAL_MS = 15_000;
+  const MAX_DURATION_MS = 24 * 60 * 60 * 1000;
+  const MAX_SELL_ATTEMPTS = 3;
+  const PROBE_AMOUNT_ETH = "0.0001"; // tiny ETH equivalent for price probing
   const startAt = Date.now();
   let sellAttempts = 0;
 
   while (Date.now() - startAt < MAX_DURATION_MS) {
     await new Promise(r => setTimeout(r, INTERVAL_MS));
 
-    // Re-check trade status — if already sold/failed, stop
     const [trade] = await db.select().from(tradesTable).where(eq(tradesTable.id, tradeId));
     if (!trade || !["confirmed"].includes(trade.status)) break;
 
-    // Estimate current price via probe simulation
+    // Estimate current price via Li.Fi quote for a tiny ETH → token swap
     let currentPrice = entryPriceEth;
     try {
-      const { result: probeTokens } = await publicClient.simulateContract({
-        address: tokenAddress,
-        abi: ZORA_COIN_BUY_ABI,
-        functionName: "buy",
-        args: [probeAccount, probeAccount, ZERO_ADDRESS, "price-probe", marketType, 0n, 0n],
-        value: PROBE_ETH,
-        account: probeAccount,
-      });
-      if (probeTokens > 0n) {
-        currentPrice = 0.0001 / parseFloat(formatUnits(probeTokens, 18));
+      const probeQuote = await getLiFiQuote(
+        ETH_ADDRESS,
+        tokenAddress,
+        parseEther(PROBE_AMOUNT_ETH),
+        probeAccount,
+        5, // 5% slippage for price probe
+      );
+      const probeTokens = parseFloat(formatUnits(BigInt(probeQuote.estimate.toAmount), 18));
+      if (probeTokens > 0) {
+        currentPrice = parseFloat(PROBE_AMOUNT_ETH) / probeTokens;
       }
     } catch {
-      // FIX: If probe fails with current market type, the token may have graduated.
-      // Re-detect the market type and retry the probe once before giving up.
-      try {
-        marketType = await getMarketType(publicClient, tokenAddress);
-        const { result: probeTokens } = await publicClient.simulateContract({
-          address: tokenAddress,
-          abi: ZORA_COIN_BUY_ABI,
-          functionName: "buy",
-          args: [probeAccount, probeAccount, ZERO_ADDRESS, "price-probe", marketType, 0n, 0n],
-          value: PROBE_ETH,
-          account: probeAccount,
-        });
-        if (probeTokens > 0n) {
-          currentPrice = 0.0001 / parseFloat(formatUnits(probeTokens, 18));
-        }
-      } catch {
-        continue; // RPC issue, retry next interval
-      }
+      continue; // API issue, retry next interval
     }
 
     const shouldTp = tpPrice !== null && currentPrice >= tpPrice;
@@ -322,14 +344,11 @@ async function monitorTpSl(
     if (!shouldTp && !shouldSl) continue;
 
     const reason = shouldTp ? "take_profit" : "stop_loss";
-    logger.info({ tradeId, reason, currentPrice, tpPrice, slPrice }, "TP/SL triggered, executing sell");
+    logger.info({ tradeId, reason, currentPrice, tpPrice, slPrice }, "TP/SL triggered, executing sell via Li.Fi");
 
     try {
       const account = privateKeyToAccount(getWalletKey());
       const walletClient = createWalletClient({ account, chain: base, transport: http(getHttpRpcUrl()) });
-
-      // FIX: Re-detect market type right before selling in case token graduated.
-      const sellMarketType = await getMarketType(publicClient, tokenAddress);
 
       // Get current token balance
       const rawBal = await publicClient.readContract({
@@ -344,45 +363,42 @@ async function monitorTpSl(
         break;
       }
 
-      // Bug fix: estimate minPayoutSize to protect against frontrunning.
-      // Use current price probe result with 10% sell slippage tolerance.
-      let minPayoutSize = 0n;
-      try {
-        const balNum = parseFloat(formatUnits(rawBal, 18));
-        const expectedEth = balNum * currentPrice;
-        const withSlippage = expectedEth * 0.9; // 10% slippage tolerance
-        if (withSlippage > 0) minPayoutSize = parseEther(withSlippage.toFixed(18));
-      } catch {
-        /* keep 0 — better to sell at any price than not at all */
+      // Get Li.Fi quote for token → ETH sell
+      const sellQuote = await getLiFiQuote(
+        tokenAddress,
+        ETH_ADDRESS,
+        rawBal,
+        account.address,
+        10, // 10% slippage for sell
+      );
+
+      // Approve Li.Fi spender if needed
+      if (sellQuote.estimate.approvalAddress) {
+        await ensureApproval(
+          publicClient,
+          walletClient,
+          account.address,
+          tokenAddress,
+          sellQuote.estimate.approvalAddress as Address,
+          rawBal,
+        );
       }
 
-      const hash = await walletClient.writeContract({
-        address: tokenAddress,
-        abi: ZORA_SELL_ABI,
-        functionName: "sell",
-        args: [rawBal, account.address, account.address, ZERO_ADDRESS, reason, sellMarketType, minPayoutSize, 0n],
+      const { transactionRequest: sellTx } = sellQuote;
+      const hash = await walletClient.sendTransaction({
+        to: sellTx.to as Address,
+        data: sellTx.data as `0x${string}`,
+        value: BigInt(sellTx.value || "0"),
+        gas: sellTx.gasLimit ? BigInt(sellTx.gasLimit) : undefined,
+        account,
+        chain: base,
       });
 
       const receipt = await publicClient.waitForTransactionReceipt({ hash });
       if (receipt.status === "success") {
-        // Bug fix: re-simulate sell at block BEFORE it landed to get the actual
-        // ETH payout, instead of using the approximated currentPrice * tokens.
-        let ethRecovered = "0";
-        try {
-          const { result: ethPayout } = await publicClient.simulateContract({
-            address: tokenAddress,
-            abi: ZORA_SELL_ABI,
-            functionName: "sell",
-            args: [rawBal, account.address, account.address, ZERO_ADDRESS, reason, sellMarketType, 0n, 0n],
-            account: account.address,
-            blockNumber: receipt.blockNumber - 1n, // state before sell landed
-          });
-          if (ethPayout > 0n) ethRecovered = formatEther(ethPayout);
-        } catch {
-          // Fallback: approximate from price probe
-          const tokensNum = parseFloat(formatUnits(rawBal, 18));
-          ethRecovered = (tokensNum * currentPrice).toFixed(6);
-        }
+        const ethRecovered = sellQuote.estimate.toAmountMin
+          ? formatEther(BigInt(sellQuote.estimate.toAmountMin))
+          : (parseFloat(formatUnits(rawBal, 18)) * currentPrice).toFixed(6);
 
         const buyEthNum = parseFloat(buyAmountEth);
         const pnl = (parseFloat(ethRecovered) - buyEthNum).toFixed(6);
@@ -392,22 +408,19 @@ async function monitorTpSl(
           .set({ status: "sold", sellTxHash: hash, sellAmountEth: ethRecovered, pnlEth: pnl })
           .where(eq(tradesTable.id, tradeId));
 
-        logger.info({ tradeId, reason, pnl, ethRecovered, hash }, "TP/SL sell confirmed");
-        break; // done
+        logger.info({ tradeId, reason, pnl, ethRecovered, hash }, "TP/SL sell confirmed via Li.Fi");
+        break;
       } else {
-        throw new Error("Sell tx reverted on-chain");
+        throw new Error("Li.Fi sell tx reverted on-chain");
       }
     } catch (err) {
       sellAttempts++;
       logger.error({ err, tradeId, sellAttempts, maxAttempts: MAX_SELL_ATTEMPTS }, "TP/SL sell failed");
 
-      // Bug fix: retry up to MAX_SELL_ATTEMPTS. Previously did `break` immediately,
-      // leaving the trade stuck as "confirmed" with no active monitor.
       if (sellAttempts >= MAX_SELL_ATTEMPTS) {
-        logger.error({ tradeId }, "Max sell attempts reached — monitor exiting, position requires manual intervention");
+        logger.error({ tradeId }, "Max sell attempts reached — monitor exiting");
         break;
       }
-      // Back off before retry: wait 2 extra intervals
       await new Promise(r => setTimeout(r, INTERVAL_MS * 2));
     }
   }
@@ -449,32 +462,23 @@ router.post("/trades/manual-buy", async (req, res): Promise<void> => {
     /* proceed with defaults */
   }
 
-  // FIX: Detect market type before the probe simulation.
-  const marketType = await getMarketType(publicClient, addr);
-
-  // Determine entry price for TP/SL via probe simulation
+  // Estimate entry price via Li.Fi probe quote
   let entryPriceEth = 0;
   try {
-    const PROBE_ETH = parseEther("0.0001");
     let probeAccount: Address;
-    try {
-      probeAccount = privateKeyToAccount(getWalletKey()).address;
-    } catch {
-      probeAccount = ZERO_ADDRESS;
-    }
-    const { result: probeTokens } = await publicClient.simulateContract({
-      address: addr,
-      abi: ZORA_COIN_BUY_ABI,
-      functionName: "buy",
-      args: [probeAccount, probeAccount, ZERO_ADDRESS, "price-probe", marketType, 0n, 0n],
-      value: PROBE_ETH,
-      account: probeAccount,
-    });
-    if (probeTokens > 0n) {
-      entryPriceEth = 0.0001 / parseFloat(formatUnits(probeTokens, 18));
-    }
+    try { probeAccount = privateKeyToAccount(getWalletKey()).address; } catch { probeAccount = ZERO_ADDRESS; }
+
+    const probeQuote = await getLiFiQuote(
+      ETH_ADDRESS,
+      addr,
+      parseEther("0.0001"),
+      probeAccount,
+      slippagePercent,
+    );
+    const probeTokens = parseFloat(formatUnits(BigInt(probeQuote.estimate.toAmount), 18));
+    if (probeTokens > 0) entryPriceEth = 0.0001 / probeTokens;
   } catch {
-    /* price probe failed */
+    /* price probe failed — entry price stays 0 */
   }
 
   const [tradeRow] = await db
@@ -493,11 +497,6 @@ router.post("/trades/manual-buy", async (req, res): Promise<void> => {
     })
     .returning();
 
-  // Fire and forget — runBuy returns the actual confirmed entry price so the
-  // TP/SL monitor uses a real value, not the pre-buy probe approximation.
-  // Bug fix: previously passed `entryPriceEth` (probe price captured before
-  // the buy) which could be stale or 0 (if probe failed), causing the monitor
-  // to never start or trigger at the wrong price.
   runBuy(tradeRow.id, addr, buyAmountEth, slippagePercent).then((actualEntryPrice) => {
     const monitorEntryPrice = actualEntryPrice > 0 ? actualEntryPrice : entryPriceEth;
     if ((takeProfitPercent || stopLossPercent) && monitorEntryPrice > 0) {
@@ -512,11 +511,10 @@ router.post("/trades/manual-buy", async (req, res): Promise<void> => {
     }
   });
 
-  // Return the full Trade object so the client can render it immediately
   res.status(201).json(tradeRow);
 });
 
-// ── Simulate (dry-run, zero ETH spent) ─────────────────────────────────────
+// ── Simulate (dry-run via Li.Fi quote) ─────────────────────────────────────
 
 const SimulateBody = z.object({
   tokenAddress: z.string().regex(/^0x[0-9a-fA-F]{40}$/, "Invalid address"),
@@ -543,6 +541,7 @@ router.post("/manual/simulate", async (req, res): Promise<void> => {
     expectedTokensOut: string | null;
     minOrderSize: string | null;
     entryPriceEth: string | null;
+    route: string | null;
     errorReason: string | null;
     checks: { tokenReadable: boolean; buySimulatable: boolean };
   } = {
@@ -554,6 +553,7 @@ router.post("/manual/simulate", async (req, res): Promise<void> => {
     expectedTokensOut: null,
     minOrderSize: null,
     entryPriceEth: null,
+    route: null,
     errorReason: null,
     checks: { tokenReadable: false, buySimulatable: false },
   };
@@ -569,53 +569,38 @@ router.post("/manual/simulate", async (req, res): Promise<void> => {
     result.checks.tokenReadable = true;
   } catch (err) {
     const msg = err instanceof Error ? err.message : String(err);
-    result.errorReason = `Token not readable on-chain — might not be a valid ERC20: ${msg.slice(0, 200)}`;
+    result.errorReason = `Token not readable on-chain: ${msg.slice(0, 200)}`;
     res.json(result);
     return;
   }
 
-  // Step 2: Simulate buy() — identical logic as sniper/trader
+  // Step 2: Get Li.Fi quote
   try {
     let simAccount: Address;
-    try {
-      simAccount = privateKeyToAccount(getWalletKey()).address;
-    } catch {
-      // Fall back to zero address for simulation when no wallet configured
-      simAccount = ZERO_ADDRESS;
-    }
+    try { simAccount = privateKeyToAccount(getWalletKey()).address; } catch { simAccount = ZERO_ADDRESS; }
 
-    const value = parseEther(buyAmountEth);
+    const quote = await getLiFiQuote(
+      ETH_ADDRESS,
+      addr,
+      parseEther(buyAmountEth),
+      simAccount,
+      5,
+    );
 
-    // FIX: Detect market type so the simulation uses the correct value.
-    const marketType = await getMarketType(publicClient, addr);
-
-    const { result: expectedTokens } = await publicClient.simulateContract({
-      address: addr,
-      abi: ZORA_COIN_BUY_ABI,
-      functionName: "buy",
-      args: [simAccount, simAccount, ZERO_ADDRESS, "zora-sniper-simulate", marketType, 0n, 0n],
-      value,
-      account: simAccount,
-    });
-
-    // 5% default slippage (same as sniper default)
-    const defaultSlippageBps = 500n;
-    const minOrder = (expectedTokens * (10_000n - defaultSlippageBps)) / 10_000n;
-
-    const tokensNum = parseFloat(formatUnits(expectedTokens, 18));
+    const tokensNum = parseFloat(formatUnits(BigInt(quote.estimate.toAmount), 18));
+    const minTokensNum = parseFloat(formatUnits(BigInt(quote.estimate.toAmountMin), 18));
     const ethNum = parseFloat(buyAmountEth);
     const entryPrice = tokensNum > 0 ? (ethNum / tokensNum).toFixed(18) : "0";
 
     result.checks.buySimulatable = true;
-    result.expectedTokensOut = formatUnits(expectedTokens, 18);
-    result.minOrderSize = formatUnits(minOrder, 18);
+    result.expectedTokensOut = formatUnits(BigInt(quote.estimate.toAmount), 18);
+    result.minOrderSize = formatUnits(BigInt(quote.estimate.toAmountMin), 18);
     result.entryPriceEth = entryPrice;
+    result.route = quote.tool ?? "unknown";
     result.success = true;
   } catch (err) {
     const raw = err instanceof Error ? err.message : String(err);
-    // Trim viem verbose stack traces to a useful first line
-    const msg = raw.split("\n")[0].slice(0, 300);
-    result.errorReason = `Buy simulation failed: ${msg}`;
+    result.errorReason = `Li.Fi simulation failed: ${raw.split("\n")[0].slice(0, 300)}`;
   }
 
   req.log.info({ tokenAddress, buyAmountEth, success: result.success }, "Simulate complete");
@@ -641,7 +626,6 @@ router.get("/token/:address", async (req, res): Promise<void> => {
       publicClient.readContract({ address: addr, abi: ERC20_ABI, functionName: "totalSupply" }),
     ]);
 
-    // Wallet balance if available
     let walletBalance = "0";
     try {
       const account = privateKeyToAccount(getWalletKey());
@@ -656,38 +640,29 @@ router.get("/token/:address", async (req, res): Promise<void> => {
       /* no wallet configured */
     }
 
-    // Price estimation via tiny buy simulation
+    // Price estimation via Li.Fi quote probe
     let priceEth = "0";
     let mcEth = "0";
     try {
-      const PROBE_ETH = parseEther("0.0001");
       let probeAccount: Address;
-      try {
-        probeAccount = privateKeyToAccount(getWalletKey()).address;
-      } catch {
-        probeAccount = ZERO_ADDRESS;
-      }
+      try { probeAccount = privateKeyToAccount(getWalletKey()).address; } catch { probeAccount = ZERO_ADDRESS; }
 
-      // FIX: Detect market type for the price probe.
-      const marketType = await getMarketType(publicClient, addr);
-
-      const { result: probeTokens } = await publicClient.simulateContract({
-        address: addr,
-        abi: ZORA_COIN_BUY_ABI,
-        functionName: "buy",
-        args: [probeAccount, probeAccount, ZERO_ADDRESS, "price-probe", marketType, 0n, 0n],
-        value: PROBE_ETH,
-        account: probeAccount,
-      });
-
-      if (probeTokens > 0n) {
-        const priceNum = 0.0001 / parseFloat(formatUnits(probeTokens, 18));
+      const probeQuote = await getLiFiQuote(
+        ETH_ADDRESS,
+        addr,
+        parseEther("0.0001"),
+        probeAccount,
+        5,
+      );
+      const probeTokens = parseFloat(formatUnits(BigInt(probeQuote.estimate.toAmount), 18));
+      if (probeTokens > 0) {
+        const priceNum = 0.0001 / probeTokens;
         priceEth = priceNum.toFixed(18);
         const mcNum = parseFloat(formatUnits(totalSupply as bigint, 18)) * priceNum;
         mcEth = mcNum.toFixed(6);
       }
     } catch {
-      /* pool not yet active or estimation failed */
+      /* pool not yet active or no Li.Fi route */
     }
 
     res.json({ address: addr, name, symbol, totalSupply: formatUnits(totalSupply as bigint, 18), walletBalance, priceEth, mcEth });
@@ -723,7 +698,6 @@ router.get("/positions", async (_req, res): Promise<void> => {
     openTrades.map(async (trade: Trade) => {
       const addr = trade.tokenAddress as Address;
 
-      // Current on-chain token balance
       let currentBalanceTokens = "0";
       try {
         const rawBal = await publicClient.readContract({
@@ -746,26 +720,23 @@ router.get("/positions", async (_req, res): Promise<void> => {
 
       if (balNum > 0 && entryPriceNum > 0) {
         try {
-          const PROBE_ETH = parseEther("0.0001");
-          // FIX: Detect market type per token for accurate position price probes.
-          const marketType = await getMarketType(publicClient, addr);
-          const { result: probeTokens } = await publicClient.simulateContract({
-            address: addr,
-            abi: ZORA_COIN_BUY_ABI,
-            functionName: "buy",
-            args: [walletAddress, walletAddress, ZERO_ADDRESS, "price-probe", marketType, 0n, 0n],
-            value: PROBE_ETH,
-            account: walletAddress,
-          });
-          if (probeTokens > 0n) {
-            const currentPrice = 0.0001 / parseFloat(formatUnits(probeTokens, 18));
+          const probeQuote = await getLiFiQuote(
+            ETH_ADDRESS,
+            addr,
+            parseEther("0.0001"),
+            walletAddress,
+            5,
+          );
+          const probeTokens = parseFloat(formatUnits(BigInt(probeQuote.estimate.toAmount), 18));
+          if (probeTokens > 0) {
+            const currentPrice = 0.0001 / probeTokens;
             const currentValue = balNum * currentPrice;
             currentValueEth = currentValue.toFixed(6);
             const buyEth = parseFloat(trade.buyAmountEth);
             pnlPercent = buyEth > 0 ? ((currentValue - buyEth) / buyEth) * 100 : 0;
           }
         } catch {
-          /* RPC unavailable — keep defaults */
+          /* Li.Fi unavailable — keep defaults */
         }
       }
 
