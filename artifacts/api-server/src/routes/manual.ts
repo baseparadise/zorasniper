@@ -6,7 +6,6 @@ import {
   parseEther,
   formatEther,
   formatUnits,
-  parseUnits,
   maxUint256,
   type Address,
 } from "viem";
