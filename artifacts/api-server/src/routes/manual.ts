@@ -44,6 +44,17 @@ const ZORA_COIN_BUY_ABI = [
   },
 ] as const;
 
+// FIX: ABI to read the on-chain market type (0 = primary/bonding curve, 1 = secondary/Uniswap)
+const MARKET_TYPE_ABI = [
+  {
+    type: "function",
+    name: "marketType",
+    stateMutability: "view",
+    inputs: [],
+    outputs: [{ name: "", type: "uint8" }],
+  },
+] as const;
+
 const ZERO_ADDRESS = "0x0000000000000000000000000000000000000000" as Address;
 
 // ── Helpers ────────────────────────────────────────────────────────────────
@@ -61,6 +72,33 @@ function getWalletKey(): `0x${string}` {
 
 function makePublicClient() {
   return createPublicClient({ chain: base, transport: http(getHttpRpcUrl()) });
+}
+
+/**
+ * FIX: Reads the on-chain marketType() from the Zora coin contract.
+ * Returns 0 (primary/bonding curve) or 1 (secondary/Uniswap V3).
+ *
+ * Root cause of all "execution reverted" failures: buy() and sell() have an
+ * `expectedMarketType` safety check — if you pass 0 but the token is already
+ * on Uniswap (type 1), the contract reverts immediately. All callers must
+ * detect the actual market type first.
+ */
+async function getMarketType(
+  publicClient: ReturnType<typeof makePublicClient>,
+  tokenAddress: Address,
+): Promise<number> {
+  try {
+    const mt = await publicClient.readContract({
+      address: tokenAddress,
+      abi: MARKET_TYPE_ABI,
+      functionName: "marketType",
+    });
+    return Number(mt);
+  } catch {
+    // Default to primary market (0) if the call fails (e.g. old contract that
+    // doesn't expose marketType — those are always primary/bonding-curve).
+    return 0;
+  }
 }
 
 // ── Background buy executor ────────────────────────────────────────────────
@@ -84,6 +122,11 @@ async function runBuy(
 
     const value = parseEther(buyAmountEth);
 
+    // FIX: Detect the actual market type before any buy call.
+    // Hardcoding 0 causes "execution reverted" for tokens already on Uniswap (type 1).
+    const marketType = await getMarketType(publicClient, tokenAddress);
+    logger.info({ tradeId, tokenAddress, marketType }, "Detected market type for buy");
+
     // Simulate to get expected tokens and calculate minOrderSize with slippage
     let minOrderSize = 0n;
     try {
@@ -91,7 +134,7 @@ async function runBuy(
         address: tokenAddress,
         abi: ZORA_COIN_BUY_ABI,
         functionName: "buy",
-        args: [account.address, account.address, ZERO_ADDRESS, "zora-sniper-manual", 0, 0n, 0n],
+        args: [account.address, account.address, ZERO_ADDRESS, "zora-sniper-manual", marketType, 0n, 0n],
         value,
         account,
       });
@@ -106,7 +149,7 @@ async function runBuy(
       address: tokenAddress,
       abi: ZORA_COIN_BUY_ABI,
       functionName: "buy",
-      args: [account.address, account.address, ZERO_ADDRESS, "zora-sniper-manual", 0, minOrderSize, 0n],
+      args: [account.address, account.address, ZERO_ADDRESS, "zora-sniper-manual", marketType, minOrderSize, 0n],
       value,
     });
 
@@ -125,7 +168,7 @@ async function runBuy(
           address: tokenAddress,
           abi: ZORA_COIN_BUY_ABI,
           functionName: "buy",
-          args: [account.address, account.address, ZERO_ADDRESS, "zora-sniper-manual", 0, minOrderSize, 0n],
+          args: [account.address, account.address, ZERO_ADDRESS, "zora-sniper-manual", marketType, minOrderSize, 0n],
           value,
           account,
           blockNumber: receipt.blockNumber,
@@ -216,10 +259,14 @@ async function monitorTpSl(
     probeAccount = ZERO_ADDRESS;
   }
 
+  // FIX: Detect market type once at monitor start; re-detect before sell in case
+  // the token graduates from primary to secondary during the holding period.
+  let marketType = await getMarketType(publicClient, tokenAddress);
+
   const tpPrice = takeProfitPercent ? entryPriceEth * (1 + takeProfitPercent / 100) : null;
   const slPrice = stopLossPercent ? entryPriceEth * (1 - stopLossPercent / 100) : null;
 
-  logger.info({ tradeId, entryPriceEth, tpPrice, slPrice }, "Starting TP/SL monitor");
+  logger.info({ tradeId, entryPriceEth, tpPrice, slPrice, marketType }, "Starting TP/SL monitor");
 
   const INTERVAL_MS = 15_000;        // check every 15s
   const MAX_DURATION_MS = 24 * 60 * 60 * 1000; // max 24h
@@ -241,7 +288,7 @@ async function monitorTpSl(
         address: tokenAddress,
         abi: ZORA_COIN_BUY_ABI,
         functionName: "buy",
-        args: [probeAccount, probeAccount, ZERO_ADDRESS, "price-probe", 0, 0n, 0n],
+        args: [probeAccount, probeAccount, ZERO_ADDRESS, "price-probe", marketType, 0n, 0n],
         value: PROBE_ETH,
         account: probeAccount,
       });
@@ -249,7 +296,24 @@ async function monitorTpSl(
         currentPrice = 0.0001 / parseFloat(formatUnits(probeTokens, 18));
       }
     } catch {
-      continue; // RPC issue, retry next interval
+      // FIX: If probe fails with current market type, the token may have graduated.
+      // Re-detect the market type and retry the probe once before giving up.
+      try {
+        marketType = await getMarketType(publicClient, tokenAddress);
+        const { result: probeTokens } = await publicClient.simulateContract({
+          address: tokenAddress,
+          abi: ZORA_COIN_BUY_ABI,
+          functionName: "buy",
+          args: [probeAccount, probeAccount, ZERO_ADDRESS, "price-probe", marketType, 0n, 0n],
+          value: PROBE_ETH,
+          account: probeAccount,
+        });
+        if (probeTokens > 0n) {
+          currentPrice = 0.0001 / parseFloat(formatUnits(probeTokens, 18));
+        }
+      } catch {
+        continue; // RPC issue, retry next interval
+      }
     }
 
     const shouldTp = tpPrice !== null && currentPrice >= tpPrice;
@@ -263,6 +327,9 @@ async function monitorTpSl(
     try {
       const account = privateKeyToAccount(getWalletKey());
       const walletClient = createWalletClient({ account, chain: base, transport: http(getHttpRpcUrl()) });
+
+      // FIX: Re-detect market type right before selling in case token graduated.
+      const sellMarketType = await getMarketType(publicClient, tokenAddress);
 
       // Get current token balance
       const rawBal = await publicClient.readContract({
@@ -293,7 +360,7 @@ async function monitorTpSl(
         address: tokenAddress,
         abi: ZORA_SELL_ABI,
         functionName: "sell",
-        args: [rawBal, account.address, account.address, ZERO_ADDRESS, reason, 0, minPayoutSize, 0n],
+        args: [rawBal, account.address, account.address, ZERO_ADDRESS, reason, sellMarketType, minPayoutSize, 0n],
       });
 
       const receipt = await publicClient.waitForTransactionReceipt({ hash });
@@ -306,7 +373,7 @@ async function monitorTpSl(
             address: tokenAddress,
             abi: ZORA_SELL_ABI,
             functionName: "sell",
-            args: [rawBal, account.address, account.address, ZERO_ADDRESS, reason, 0, 0n, 0n],
+            args: [rawBal, account.address, account.address, ZERO_ADDRESS, reason, sellMarketType, 0n, 0n],
             account: account.address,
             blockNumber: receipt.blockNumber - 1n, // state before sell landed
           });
@@ -382,6 +449,9 @@ router.post("/trades/manual-buy", async (req, res): Promise<void> => {
     /* proceed with defaults */
   }
 
+  // FIX: Detect market type before the probe simulation.
+  const marketType = await getMarketType(publicClient, addr);
+
   // Determine entry price for TP/SL via probe simulation
   let entryPriceEth = 0;
   try {
@@ -396,7 +466,7 @@ router.post("/trades/manual-buy", async (req, res): Promise<void> => {
       address: addr,
       abi: ZORA_COIN_BUY_ABI,
       functionName: "buy",
-      args: [probeAccount, probeAccount, ZERO_ADDRESS, "price-probe", 0, 0n, 0n],
+      args: [probeAccount, probeAccount, ZERO_ADDRESS, "price-probe", marketType, 0n, 0n],
       value: PROBE_ETH,
       account: probeAccount,
     });
@@ -516,11 +586,14 @@ router.post("/manual/simulate", async (req, res): Promise<void> => {
 
     const value = parseEther(buyAmountEth);
 
+    // FIX: Detect market type so the simulation uses the correct value.
+    const marketType = await getMarketType(publicClient, addr);
+
     const { result: expectedTokens } = await publicClient.simulateContract({
       address: addr,
       abi: ZORA_COIN_BUY_ABI,
       functionName: "buy",
-      args: [simAccount, simAccount, ZERO_ADDRESS, "zora-sniper-simulate", 0, 0n, 0n],
+      args: [simAccount, simAccount, ZERO_ADDRESS, "zora-sniper-simulate", marketType, 0n, 0n],
       value,
       account: simAccount,
     });
@@ -595,11 +668,14 @@ router.get("/token/:address", async (req, res): Promise<void> => {
         probeAccount = ZERO_ADDRESS;
       }
 
+      // FIX: Detect market type for the price probe.
+      const marketType = await getMarketType(publicClient, addr);
+
       const { result: probeTokens } = await publicClient.simulateContract({
         address: addr,
         abi: ZORA_COIN_BUY_ABI,
         functionName: "buy",
-        args: [probeAccount, probeAccount, ZERO_ADDRESS, "price-probe", 0, 0n, 0n],
+        args: [probeAccount, probeAccount, ZERO_ADDRESS, "price-probe", marketType, 0n, 0n],
         value: PROBE_ETH,
         account: probeAccount,
       });
@@ -671,11 +747,13 @@ router.get("/positions", async (_req, res): Promise<void> => {
       if (balNum > 0 && entryPriceNum > 0) {
         try {
           const PROBE_ETH = parseEther("0.0001");
+          // FIX: Detect market type per token for accurate position price probes.
+          const marketType = await getMarketType(publicClient, addr);
           const { result: probeTokens } = await publicClient.simulateContract({
             address: addr,
             abi: ZORA_COIN_BUY_ABI,
             functionName: "buy",
-            args: [walletAddress, walletAddress, ZERO_ADDRESS, "price-probe", 0, 0n, 0n],
+            args: [walletAddress, walletAddress, ZERO_ADDRESS, "price-probe", marketType, 0n, 0n],
             value: PROBE_ETH,
             account: walletAddress,
           });
