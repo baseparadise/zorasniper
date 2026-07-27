@@ -780,4 +780,58 @@ router.get("/manual/status/:id", async (req, res): Promise<void> => {
   res.json(row);
 });
 
+
+// ── Startup recovery: restart TP/SL monitors for confirmed trades ──────────
+
+/**
+ * Called once at server startup. Finds all confirmed manual trades that
+ * still have TP or SL set and restarts their in-memory monitors.
+ * Without this, monitors die on every Railway redeploy/restart.
+ */
+export async function recoverTpSlMonitors(): Promise<void> {
+  try {
+    const openTrades = await db
+      .select()
+      .from(tradesTable)
+      .where(
+        and(
+          eq(tradesTable.source, 'manual'),
+          eq(tradesTable.status, 'confirmed'),
+        ),
+      );
+
+    const recoverable = openTrades.filter(
+      (t) => (t.takeProfitPercent || t.stopLossPercent) && t.entryPriceEth,
+    );
+
+    if (recoverable.length === 0) {
+      logger.info('TP/SL recovery: no active monitors to restart');
+      return;
+    }
+
+    logger.info({ count: recoverable.length }, 'TP/SL recovery: restarting monitors');
+
+    for (const trade of recoverable) {
+      const entryPrice = parseFloat(trade.entryPriceEth!);
+      const tp = trade.takeProfitPercent ? parseFloat(trade.takeProfitPercent) : null;
+      const sl = trade.stopLossPercent ? parseFloat(trade.stopLossPercent) : null;
+
+      monitorTpSl(
+        trade.id,
+        trade.tokenAddress as Address,
+        entryPrice,
+        tp,
+        sl,
+        trade.buyAmountEth ?? '0',
+      ).catch((err) =>
+        logger.error({ err, tradeId: trade.id }, 'TP/SL recovery monitor error'),
+      );
+
+      logger.info({ tradeId: trade.id, token: trade.tokenAddress, tp, sl }, 'TP/SL monitor recovered');
+    }
+  } catch (err) {
+    logger.error({ err }, 'TP/SL recovery failed — monitors not restarted');
+  }
+}
+
 export default router;
