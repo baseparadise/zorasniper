@@ -4,6 +4,7 @@ import {
   http,
   parseEther,
   formatEther,
+  formatUnits,
   type Address,
 } from "viem";
 import { base } from "viem/chains";
@@ -29,6 +30,17 @@ const ZORA_COIN_ABI = [
       { name: "minOrderSize", type: "uint256" },
       { name: "sqrtPriceLimitX96", type: "uint160" },
     ],
+    outputs: [{ name: "", type: "uint256" }],
+  },
+] as const;
+
+// ERC20 balanceOf ABI — used to accurately measure tokens received after buy.
+const ERC20_BALANCE_ABI = [
+  {
+    type: "function",
+    name: "balanceOf",
+    stateMutability: "view",
+    inputs: [{ name: "account", type: "address" }],
     outputs: [{ name: "", type: "uint256" }],
   },
 ] as const;
@@ -174,25 +186,41 @@ export async function executeBuy(params: TradeParams): Promise<void> {
       receipt.gasUsed * (receipt.effectiveGasPrice ?? maxFeePerGas)
     );
 
-    // Parse token amount received from the transaction logs / return value.
-    // We read it from the receipt logs if possible; fall back to empty string.
+    // Fix: measure actual tokens received via balanceOf diff (before vs after block).
+    // Re-simulating the buy on the mined block gives a fresh simulation result, NOT
+    // the actual tokens this tx received — the pool state has already changed by then.
     let tokenAmount = "";
     try {
-      // The buy() return value is emitted as the first topic-free log data on success.
-      // Attempt a simple re-simulation on the mined block to get the return value.
-      const { result } = await publicClient.simulateContract({
-        address: tokenAddress,
-        abi: ZORA_COIN_ABI,
-        functionName: "buy",
-        args: [account.address, account.address, ZERO_ADDRESS, "zora-sniper", 0, minOrderSize, 0n],
-        value,
-        account,
-        blockNumber: receipt.blockNumber,
-      });
-      tokenAmount = result.toString();
+      const [balBefore, balAfter] = await Promise.all([
+        publicClient.readContract({
+          address: tokenAddress,
+          abi: ERC20_BALANCE_ABI,
+          functionName: "balanceOf",
+          args: [account.address],
+          blockNumber: receipt.blockNumber - 1n,
+        }),
+        publicClient.readContract({
+          address: tokenAddress,
+          abi: ERC20_BALANCE_ABI,
+          functionName: "balanceOf",
+          args: [account.address],
+          blockNumber: receipt.blockNumber,
+        }),
+      ]);
+      const received = balAfter - balBefore;
+      if (received > 0n) {
+        tokenAmount = received.toString();
+        logger.info({ received: received.toString(), tokenAddress }, "Token amount measured via balanceOf diff");
+      }
     } catch {
       // Non-fatal — token amount will be left blank
+      logger.warn({ tokenAddress }, "balanceOf diff failed — token amount left blank");
     }
+
+    // Calculate entry price: ETH spent ÷ tokens received.
+    const tokensNum = tokenAmount ? parseFloat(formatUnits(BigInt(tokenAmount), 18)) : 0;
+    const ethNum = parseFloat(buyAmountEth);
+    const entryPriceEth = tokensNum > 0 ? (ethNum / tokensNum).toFixed(18) : null;
 
     const success = receipt.status === "success";
     const [updated] = await db
@@ -203,6 +231,7 @@ export async function executeBuy(params: TradeParams): Promise<void> {
         gasUsedEth,
         tokenAmount: tokenAmount || null,
         blockNumber: Number(receipt.blockNumber),
+        entryPriceEth: success ? entryPriceEth : null,
       })
       .where(eq(tradesTable.id, tradeRow.id))
       .returning();
