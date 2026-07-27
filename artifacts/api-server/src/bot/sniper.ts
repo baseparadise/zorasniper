@@ -287,7 +287,7 @@ async function handleCoinCreated(params: {
   // ─────────────────────────────────────────────────────────────────────────
 
   logger.info(
-    { creatorAddr, coin, effectiveBuyAmount },
+    { creatorAddr, coin, effectiveBuyAmount, eventName },
     "Creator matched — executing snipe"
   );
 
@@ -320,7 +320,8 @@ async function handleCoinCreated(params: {
     return;
   }
 
-  // Fire-and-forget: don't await so we keep listening
+  // Fire-and-forget: don't await so we keep listening.
+  // Pass eventName so executeBuy can derive the correct expectedMarketType.
   executeBuy({
     tokenAddress: coin,
     tokenName: name,
@@ -329,6 +330,7 @@ async function handleCoinCreated(params: {
     buyAmountEth: effectiveBuyAmount,
     slippagePercent: effectiveSlippage,
     maxGasGwei: effectiveMaxGas,
+    eventName,
   }).catch((err) => logger.error({ err }, "executeBuy error"));
 }
 
