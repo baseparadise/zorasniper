@@ -51,6 +51,24 @@ const ERC20_ABI = [
 // Zora Quote API endpoint
 const ZORA_QUOTE_API = "https://api-sdk.zora.engineering";
 
+// ── Zora API key rotator ─────────────────────────────────────────────────────
+// Supports multiple keys via ZORA_API_KEYS (comma-separated).
+// Falls back to ZORA_API_KEY for backward compatibility.
+// Uses round-robin so concurrent calls spread load across keys.
+const ZORA_API_KEYS: string[] = (() => {
+  const multi = process.env.ZORA_API_KEYS;
+  if (multi) return multi.split(',').map((k) => k.trim()).filter(Boolean);
+  const single = process.env.ZORA_API_KEY;
+  return single ? [single] : [];
+})();
+let _zoraKeyIdx = 0;
+function nextZoraKey(): string | undefined {
+  if (ZORA_API_KEYS.length === 0) return undefined;
+  const key = ZORA_API_KEYS[_zoraKeyIdx % ZORA_API_KEYS.length];
+  _zoraKeyIdx = (_zoraKeyIdx + 1) % ZORA_API_KEYS.length;
+  return key;
+}
+
 // Small probe amount for price estimation (never actually sent)
 const PROBE_ETH_WEI = parseEther("0.001");
 
@@ -113,9 +131,9 @@ async function fetchZoraQuote(params: {
   slippage: number; // fractional, e.g. 0.05 for 5%
   sender: string;
 }): Promise<ZoraCall> {
-  const apiKey = process.env.ZORA_API_KEY;
   const headers: Record<string, string> = { "Content-Type": "application/json" };
-  if (apiKey) headers["x-api-key"] = apiKey;
+  const _apiKey = nextZoraKey();
+  if (_apiKey) headers["x-api-key"] = _apiKey;
 
   const body = JSON.stringify({
     chainId: base.id,
@@ -180,9 +198,9 @@ async function fetchZoraSellQuote(params: {
   slippage: number; // fractional
   sender: string;
 }): Promise<ZoraCall> {
-  const apiKey = process.env.ZORA_API_KEY;
   const headers: Record<string, string> = { "Content-Type": "application/json" };
-  if (apiKey) headers["x-api-key"] = apiKey;
+  const _apiKey = nextZoraKey();
+  if (_apiKey) headers["x-api-key"] = _apiKey;
 
   const body = JSON.stringify({
     chainId: base.id,
@@ -248,9 +266,9 @@ async function fetchZoraPriceProbe(
   tokenAddress: string,
   sender: string,
 ): Promise<number | null> {
-  const apiKey = process.env.ZORA_API_KEY;
   const headers: Record<string, string> = { "Content-Type": "application/json" };
-  if (apiKey) headers["x-api-key"] = apiKey;
+  const _apiKey = nextZoraKey();
+  if (_apiKey) headers["x-api-key"] = _apiKey;
 
   // ── Strategy 1: buy-direction probe ──────────────────────────────────────
   try {
