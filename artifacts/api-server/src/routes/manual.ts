@@ -10,7 +10,7 @@ import {
 } from "viem";
 import { base } from "viem/chains";
 import { privateKeyToAccount } from "viem/accounts";
-import { db, tradesTable } from "@workspace/db";
+import { db, tradesTable, type Trade } from "@workspace/db";
 import { eq, and, inArray, desc } from "drizzle-orm";
 import { logger } from "../lib/logger";
 import { z } from "zod/v4";
@@ -65,12 +65,18 @@ function makePublicClient() {
 
 // ── Background buy executor ────────────────────────────────────────────────
 
+/**
+ * Executes the on-chain buy, waits for confirmation, then updates the DB.
+ * Returns the actual entry price (ETH per token) derived from the confirmed
+ * tx so the caller can pass it to the TP/SL monitor with the correct value.
+ * Returns 0 if the tx failed or the amount could not be determined.
+ */
 async function runBuy(
   tradeId: number,
   tokenAddress: Address,
   buyAmountEth: string,
   slippagePercent: number,
-): Promise<void> {
+): Promise<number> {
   try {
     const account = privateKeyToAccount(getWalletKey());
     const publicClient = makePublicClient();
@@ -110,14 +116,31 @@ async function runBuy(
     if (receipt.status === "success") {
       const gasUsedEth = formatEther(receipt.gasUsed * receipt.effectiveGasPrice);
 
-      // Determine token amount received — read from logs or fallback to last simulation result
+      // Bug fix: re-simulate at the mined block to get ACTUAL tokens received,
+      // not minOrderSize (which is the slippage floor, not the real amount).
+      // Same approach as the sniper's executeBuy in trader.ts.
       let tokenAmount = "0";
-      if (minOrderSize > 0n) tokenAmount = formatUnits(minOrderSize, 18);
+      try {
+        const { result: actualTokens } = await publicClient.simulateContract({
+          address: tokenAddress,
+          abi: ZORA_COIN_BUY_ABI,
+          functionName: "buy",
+          args: [account.address, account.address, ZERO_ADDRESS, "zora-sniper-manual", 0, minOrderSize, 0n],
+          value,
+          account,
+          blockNumber: receipt.blockNumber,
+        });
+        if (actualTokens > 0n) tokenAmount = formatUnits(actualTokens, 18);
+      } catch {
+        // Fallback: use minOrderSize as lower-bound estimate
+        if (minOrderSize > 0n) tokenAmount = formatUnits(minOrderSize, 18);
+      }
 
-      // Entry price: ETH paid / tokens received
+      // Entry price: ETH paid / tokens actually received
       const tokensNum = parseFloat(tokenAmount);
       const ethNum = parseFloat(buyAmountEth);
-      const entryPrice = tokensNum > 0 ? (ethNum / tokensNum).toFixed(18) : "0";
+      const entryPriceNum = tokensNum > 0 ? ethNum / tokensNum : 0;
+      const entryPriceStr = entryPriceNum > 0 ? entryPriceNum.toFixed(18) : null;
 
       await db
         .update(tradesTable)
@@ -126,17 +149,20 @@ async function runBuy(
           txHash: hash,
           gasUsedEth,
           tokenAmount,
-          entryPriceEth: entryPrice,
+          entryPriceEth: entryPriceStr,
+          blockNumber: Number(receipt.blockNumber), // Bug fix: was never stored
         })
         .where(eq(tradesTable.id, tradeId));
 
-      logger.info({ tradeId, hash, gasUsedEth }, "Manual buy confirmed");
+      logger.info({ tradeId, hash, gasUsedEth, tokenAmount, entryPriceNum }, "Manual buy confirmed");
+      return entryPriceNum;
     } else {
       await db
         .update(tradesTable)
         .set({ status: "failed", failReason: "Transaction reverted" })
         .where(eq(tradesTable.id, tradeId));
       logger.warn({ tradeId, hash }, "Manual buy tx reverted");
+      return 0;
     }
   } catch (err) {
     const msg = err instanceof Error ? err.message : String(err);
@@ -145,10 +171,30 @@ async function runBuy(
       .set({ status: "failed", failReason: msg.slice(0, 500) })
       .where(eq(tradesTable.id, tradeId));
     logger.error({ err, tradeId }, "Manual buy execution failed");
+    return 0;
   }
 }
 
 // ── TP/SL background monitor ───────────────────────────────────────────────
+
+const ZORA_SELL_ABI = [
+  {
+    type: "function",
+    name: "sell",
+    stateMutability: "nonpayable",
+    inputs: [
+      { name: "tokensSold", type: "uint256" },
+      { name: "recipient", type: "address" },
+      { name: "refundRecipient", type: "address" },
+      { name: "orderReferrer", type: "address" },
+      { name: "comment", type: "string" },
+      { name: "expectedMarketType", type: "uint8" },
+      { name: "minPayoutSize", type: "uint256" },
+      { name: "sqrtPriceLimitX96", type: "uint160" },
+    ],
+    outputs: [{ name: "", type: "uint256" }],
+  },
+] as const;
 
 async function monitorTpSl(
   tradeId: number,
@@ -175,9 +221,11 @@ async function monitorTpSl(
 
   logger.info({ tradeId, entryPriceEth, tpPrice, slPrice }, "Starting TP/SL monitor");
 
-  const INTERVAL_MS = 15_000; // check every 15s
+  const INTERVAL_MS = 15_000;        // check every 15s
   const MAX_DURATION_MS = 24 * 60 * 60 * 1000; // max 24h
+  const MAX_SELL_ATTEMPTS = 3;       // Bug fix: retry sell up to 3 times
   const startAt = Date.now();
+  let sellAttempts = 0;
 
   while (Date.now() - startAt < MAX_DURATION_MS) {
     await new Promise(r => setTimeout(r, INTERVAL_MS));
@@ -201,79 +249,99 @@ async function monitorTpSl(
         currentPrice = 0.0001 / parseFloat(formatUnits(probeTokens, 18));
       }
     } catch {
-      continue;
+      continue; // RPC issue, retry next interval
     }
 
     const shouldTp = tpPrice !== null && currentPrice >= tpPrice;
     const shouldSl = slPrice !== null && currentPrice <= slPrice;
 
-    if (shouldTp || shouldSl) {
-      const reason = shouldTp ? "take_profit" : "stop_loss";
-      logger.info({ tradeId, reason, currentPrice, tpPrice, slPrice }, "TP/SL triggered, executing sell");
+    if (!shouldTp && !shouldSl) continue;
 
-      try {
-        const account = privateKeyToAccount(getWalletKey());
-        const walletClient = createWalletClient({ account, chain: base, transport: http(getHttpRpcUrl()) });
+    const reason = shouldTp ? "take_profit" : "stop_loss";
+    logger.info({ tradeId, reason, currentPrice, tpPrice, slPrice }, "TP/SL triggered, executing sell");
 
-        // Get current token balance
-        const rawBal = await publicClient.readContract({
-          address: tokenAddress,
-          abi: ERC20_ABI,
-          functionName: "balanceOf",
-          args: [account.address],
-        });
+    try {
+      const account = privateKeyToAccount(getWalletKey());
+      const walletClient = createWalletClient({ account, chain: base, transport: http(getHttpRpcUrl()) });
 
-        if (rawBal === 0n) {
-          logger.warn({ tradeId }, "No token balance to sell");
-          break;
-        }
+      // Get current token balance
+      const rawBal = await publicClient.readContract({
+        address: tokenAddress,
+        abi: ERC20_ABI,
+        functionName: "balanceOf",
+        args: [account.address],
+      });
 
-        // Use Zora SDK sell — approximation: sell() on the coin contract
-        const ZORA_SELL_ABI = [
-          {
-            type: "function",
-            name: "sell",
-            stateMutability: "nonpayable",
-            inputs: [
-              { name: "tokensSold", type: "uint256" },
-              { name: "recipient", type: "address" },
-              { name: "refundRecipient", type: "address" },
-              { name: "orderReferrer", type: "address" },
-              { name: "comment", type: "string" },
-              { name: "expectedMarketType", type: "uint8" },
-              { name: "minPayoutSize", type: "uint256" },
-              { name: "sqrtPriceLimitX96", type: "uint160" },
-            ],
-            outputs: [{ name: "", type: "uint256" }],
-          },
-        ] as const;
-
-        const hash = await walletClient.writeContract({
-          address: tokenAddress,
-          abi: ZORA_SELL_ABI,
-          functionName: "sell",
-          args: [rawBal, account.address, account.address, ZERO_ADDRESS, reason, 0, 0n, 0n],
-        });
-
-        const receipt = await publicClient.waitForTransactionReceipt({ hash });
-        if (receipt.status === "success") {
-          // Estimate ETH recovered — rough: currentPrice * tokensSold
-          const tokensNum = parseFloat(formatUnits(rawBal, 18));
-          const ethRecovered = (tokensNum * currentPrice).toFixed(6);
-          const buyEthNum = parseFloat(buyAmountEth);
-          const pnl = (parseFloat(ethRecovered) - buyEthNum).toFixed(6);
-
-          await db
-            .update(tradesTable)
-            .set({ status: "sold", sellTxHash: hash, sellAmountEth: ethRecovered, pnlEth: pnl })
-            .where(eq(tradesTable.id, tradeId));
-
-          logger.info({ tradeId, reason, pnl, hash }, "TP/SL sell confirmed");
-        }
-      } catch (err) {
-        logger.error({ err, tradeId }, "TP/SL sell failed");
+      if (rawBal === 0n) {
+        logger.warn({ tradeId }, "No token balance to sell — position already closed externally");
+        break;
       }
-      break;
+
+      // Bug fix: estimate minPayoutSize to protect against frontrunning.
+      // Use current price probe result with 10% sell slippage tolerance.
+      let minPayoutSize = 0n;
+      try {
+        const balNum = parseFloat(formatUnits(rawBal, 18));
+        const expectedEth = balNum * currentPrice;
+        const withSlippage = expectedEth * 0.9; // 10% slippage tolerance
+        if (withSlippage > 0) minPayoutSize = parseEther(withSlippage.toFixed(18));
+      } catch {
+        /* keep 0 — better to sell at any price than not at all */
+      }
+
+      const hash = await walletClient.writeContract({
+        address: tokenAddress,
+        abi: ZORA_SELL_ABI,
+        functionName: "sell",
+        args: [rawBal, account.address, account.address, ZERO_ADDRESS, reason, 0, minPayoutSize, 0n],
+      });
+
+      const receipt = await publicClient.waitForTransactionReceipt({ hash });
+      if (receipt.status === "success") {
+        // Bug fix: re-simulate sell at block BEFORE it landed to get the actual
+        // ETH payout, instead of using the approximated currentPrice * tokens.
+        let ethRecovered = "0";
+        try {
+          const { result: ethPayout } = await publicClient.simulateContract({
+            address: tokenAddress,
+            abi: ZORA_SELL_ABI,
+            functionName: "sell",
+            args: [rawBal, account.address, account.address, ZERO_ADDRESS, reason, 0, 0n, 0n],
+            account: account.address,
+            blockNumber: receipt.blockNumber - 1n, // state before sell landed
+          });
+          if (ethPayout > 0n) ethRecovered = formatEther(ethPayout);
+        } catch {
+          // Fallback: approximate from price probe
+          const tokensNum = parseFloat(formatUnits(rawBal, 18));
+          ethRecovered = (tokensNum * currentPrice).toFixed(6);
+        }
+
+        const buyEthNum = parseFloat(buyAmountEth);
+        const pnl = (parseFloat(ethRecovered) - buyEthNum).toFixed(6);
+
+        await db
+          .update(tradesTable)
+          .set({ status: "sold", sellTxHash: hash, sellAmountEth: ethRecovered, pnlEth: pnl })
+          .where(eq(tradesTable.id, tradeId));
+
+        logger.info({ tradeId, reason, pnl, ethRecovered, hash }, "TP/SL sell confirmed");
+        break; // done
+      } else {
+        throw new Error("Sell tx reverted on-chain");
+      }
+    } catch (err) {
+      sellAttempts++;
+      logger.error({ err, tradeId, sellAttempts, maxAttempts: MAX_SELL_ATTEMPTS }, "TP/SL sell failed");
+
+      // Bug fix: retry up to MAX_SELL_ATTEMPTS. Previously did `break` immediately,
+      // leaving the trade stuck as "confirmed" with no active monitor.
+      if (sellAttempts >= MAX_SELL_ATTEMPTS) {
+        logger.error({ tradeId }, "Max sell attempts reached — monitor exiting, position requires manual intervention");
+        break;
+      }
+      // Back off before retry: wait 2 extra intervals
+      await new Promise(r => setTimeout(r, INTERVAL_MS * 2));
     }
   }
 }
@@ -355,13 +423,18 @@ router.post("/trades/manual-buy", async (req, res): Promise<void> => {
     })
     .returning();
 
-  // Fire and forget
-  runBuy(tradeRow.id, addr, buyAmountEth, slippagePercent).then(() => {
-    if ((takeProfitPercent || stopLossPercent) && entryPriceEth > 0) {
+  // Fire and forget — runBuy returns the actual confirmed entry price so the
+  // TP/SL monitor uses a real value, not the pre-buy probe approximation.
+  // Bug fix: previously passed `entryPriceEth` (probe price captured before
+  // the buy) which could be stale or 0 (if probe failed), causing the monitor
+  // to never start or trigger at the wrong price.
+  runBuy(tradeRow.id, addr, buyAmountEth, slippagePercent).then((actualEntryPrice) => {
+    const monitorEntryPrice = actualEntryPrice > 0 ? actualEntryPrice : entryPriceEth;
+    if ((takeProfitPercent || stopLossPercent) && monitorEntryPrice > 0) {
       monitorTpSl(
         tradeRow.id,
         addr,
-        entryPriceEth,
+        monitorEntryPrice,
         takeProfitPercent ?? null,
         stopLossPercent ?? null,
         buyAmountEth,
@@ -571,7 +644,7 @@ router.get("/positions", async (_req, res): Promise<void> => {
   }
 
   const positions = await Promise.all(
-    openTrades.map(async (trade) => {
+    openTrades.map(async (trade: Trade) => {
       const addr = trade.tokenAddress as Address;
 
       // Current on-chain token balance
