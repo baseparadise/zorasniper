@@ -23,9 +23,9 @@ export const GetBotStatusResponse = zod.object({
   "running": zod.boolean(),
   "walletAddress": zod.string().nullable(),
   "walletBalanceEth": zod.string().nullable(),
-  "totalTrades": zod.number(),
-  "snipedToday": zod.number().optional(),
-  "uptimeSeconds": zod.number(),
+  "totalTrades": zod.coerce.number(),
+  "snipedToday": zod.coerce.number().optional(),
+  "uptimeSeconds": zod.coerce.number(),
   "lastEventAt": zod.string().nullish(),
   "network": zod.string().optional()
 })
@@ -38,9 +38,9 @@ export const StartBotResponse = zod.object({
   "running": zod.boolean(),
   "walletAddress": zod.string().nullable(),
   "walletBalanceEth": zod.string().nullable(),
-  "totalTrades": zod.number(),
-  "snipedToday": zod.number().optional(),
-  "uptimeSeconds": zod.number(),
+  "totalTrades": zod.coerce.number(),
+  "snipedToday": zod.coerce.number().optional(),
+  "uptimeSeconds": zod.coerce.number(),
   "lastEventAt": zod.string().nullish(),
   "network": zod.string().optional()
 })
@@ -53,9 +53,9 @@ export const StopBotResponse = zod.object({
   "running": zod.boolean(),
   "walletAddress": zod.string().nullable(),
   "walletBalanceEth": zod.string().nullable(),
-  "totalTrades": zod.number(),
-  "snipedToday": zod.number().optional(),
-  "uptimeSeconds": zod.number(),
+  "totalTrades": zod.coerce.number(),
+  "snipedToday": zod.coerce.number().optional(),
+  "uptimeSeconds": zod.coerce.number(),
   "lastEventAt": zod.string().nullish(),
   "network": zod.string().optional()
 })
@@ -66,15 +66,15 @@ export const StopBotResponse = zod.object({
  */
 export const GetConfigResponse = zod.object({
   "buyAmountEth": zod.string().describe('ETH amount per snipe e.g. \"0.01\"'),
-  "slippagePercent": zod.number().describe('Slippage tolerance in percent'),
-  "maxGasGwei": zod.number().describe('Max gas price in Gwei'),
+  "slippagePercent": zod.coerce.number().describe('Slippage tolerance in percent'),
+  "maxGasGwei": zod.coerce.number().describe('Max gas price in Gwei'),
   "watchMode": zod.enum(['whitelist', 'all']).describe('Whitelist = only listed creators, all = any new coin'),
   "enabled": zod.boolean(),
-  "minLiquidityEth": zod.number().nullish(),
+  "minLiquidityEth": zod.coerce.number().nullish(),
   "autoSell": zod.boolean().optional(),
-  "takeProfitPercent": zod.number().nullish(),
-  "stopLossPercent": zod.number().nullish(),
-  "maxBuysPerDay": zod.number().int().nullish(),
+  "takeProfitPercent": zod.coerce.number().nullish(),
+  "stopLossPercent": zod.coerce.number().nullish(),
+  "maxBuysPerDay": zod.coerce.number().nullish().describe('Global max buys per creator wallet per day. null = no limit')
 })
 
 
@@ -91,45 +91,41 @@ export const UpdateConfigBody = zod.object({
   "autoSell": zod.boolean().optional(),
   "takeProfitPercent": zod.number().nullish(),
   "stopLossPercent": zod.number().nullish(),
-  "maxBuysPerDay": zod.number().int().nullish(),
+  "maxBuysPerDay": zod.number().nullish().describe('Global max buys per creator wallet per day. null = no limit')
 })
 
 export const UpdateConfigResponse = zod.object({
   "buyAmountEth": zod.string().describe('ETH amount per snipe e.g. \"0.01\"'),
-  "slippagePercent": zod.number().describe('Slippage tolerance in percent'),
-  "maxGasGwei": zod.number().describe('Max gas price in Gwei'),
+  "slippagePercent": zod.coerce.number().describe('Slippage tolerance in percent'),
+  "maxGasGwei": zod.coerce.number().describe('Max gas price in Gwei'),
   "watchMode": zod.enum(['whitelist', 'all']).describe('Whitelist = only listed creators, all = any new coin'),
   "enabled": zod.boolean(),
-  "minLiquidityEth": zod.number().nullish(),
+  "minLiquidityEth": zod.coerce.number().nullish(),
   "autoSell": zod.boolean().optional(),
-  "takeProfitPercent": zod.number().nullish(),
-  "stopLossPercent": zod.number().nullish(),
-  "maxBuysPerDay": zod.number().int().nullish(),
-})
-
-// Shared creator shape used in list, add, and update responses.
-// slippagePercent / maxGasGwei / takeProfitPercent / stopLossPercent are stored
-// as TEXT in the DB; maxBuysPerDay is stored as INTEGER (no coerce needed).
-const creatorShape = {
-  "address": zod.string(),
-  "label": zod.string(),
-  "enabled": zod.boolean(),
-  "addedAt": zod.coerce.date(),
-  "totalSniped": zod.number(),
-  "zoraProfileUrl": zod.string().nullish(),
-  "buyAmountEth": zod.string().nullish(),
-  "slippagePercent": zod.coerce.number().nullish(),
-  "maxGasGwei": zod.coerce.number().nullish(),
-  "autoSell": zod.boolean().nullish(),
   "takeProfitPercent": zod.coerce.number().nullish(),
   "stopLossPercent": zod.coerce.number().nullish(),
-  "maxBuysPerDay": zod.number().int().nullish(),
-} as const;
+  "maxBuysPerDay": zod.coerce.number().nullish().describe('Global max buys per creator wallet per day. null = no limit')
+})
+
 
 /**
  * @summary List whitelisted creators
  */
-export const ListCreatorsResponseItem = zod.object(creatorShape)
+export const ListCreatorsResponseItem = zod.object({
+  "address": zod.string(),
+  "label": zod.string(),
+  "enabled": zod.boolean(),
+  "addedAt": zod.coerce.date(),
+  "totalSniped": zod.coerce.number(),
+  "zoraProfileUrl": zod.string().nullish(),
+  "buyAmountEth": zod.string().nullish().describe('Per-wallet ETH buy amount. null = use global config'),
+  "slippagePercent": zod.coerce.number().nullish().describe('Per-wallet slippage %. null = use global config'),
+  "maxGasGwei": zod.coerce.number().nullish().describe('Per-wallet max gas in Gwei. null = use global config'),
+  "autoSell": zod.boolean().nullish().describe('Per-wallet auto sell override. null = use global config'),
+  "takeProfitPercent": zod.coerce.number().nullish().describe('Per-wallet take profit %. null resets to global'),
+  "stopLossPercent": zod.coerce.number().nullish().describe('Per-wallet stop loss %. null resets to global'),
+  "maxBuysPerDay": zod.coerce.number().nullish().describe('Per-wallet max buys per day. null resets to global')
+})
 export const ListCreatorsResponse = zod.array(ListCreatorsResponseItem)
 
 
@@ -137,11 +133,25 @@ export const ListCreatorsResponse = zod.array(ListCreatorsResponseItem)
  * @summary Add creator to whitelist
  */
 export const AddCreatorBody = zod.object({
-  "address": zod.string().describe('Ethereum address of the creator'),
-  "label": zod.string().optional().describe('Optional display name\/label')
+  "address": zod.string(),
+  "label": zod.string().optional()
 })
 
-export const AddCreatorResponse = zod.object(creatorShape)
+export const AddCreatorResponse = zod.object({
+  "address": zod.string(),
+  "label": zod.string(),
+  "enabled": zod.boolean(),
+  "addedAt": zod.coerce.date(),
+  "totalSniped": zod.coerce.number(),
+  "zoraProfileUrl": zod.string().nullish(),
+  "buyAmountEth": zod.string().nullish().describe('Per-wallet ETH buy amount. null = use global config'),
+  "slippagePercent": zod.coerce.number().nullish().describe('Per-wallet slippage %. null = use global config'),
+  "maxGasGwei": zod.coerce.number().nullish().describe('Per-wallet max gas in Gwei. null = use global config'),
+  "autoSell": zod.boolean().nullish().describe('Per-wallet auto sell override. null = use global config'),
+  "takeProfitPercent": zod.coerce.number().nullish().describe('Per-wallet take profit %. null resets to global'),
+  "stopLossPercent": zod.coerce.number().nullish().describe('Per-wallet stop loss %. null resets to global'),
+  "maxBuysPerDay": zod.coerce.number().nullish().describe('Per-wallet max buys per day. null resets to global')
+})
 
 
 /**
@@ -168,12 +178,26 @@ export const UpdateCreatorBody = zod.object({
   "slippagePercent": zod.number().nullish(),
   "maxGasGwei": zod.number().nullish(),
   "autoSell": zod.boolean().nullish(),
-  "takeProfitPercent": zod.number().nullish(),
-  "stopLossPercent": zod.number().nullish(),
-  "maxBuysPerDay": zod.number().int().nullish(),
+  "takeProfitPercent": zod.number().nullish().describe('Per-wallet take profit %. null resets to global'),
+  "stopLossPercent": zod.number().nullish().describe('Per-wallet stop loss %. null resets to global'),
+  "maxBuysPerDay": zod.number().nullish().describe('Per-wallet max buys per day. null resets to global')
 })
 
-export const UpdateCreatorResponse = zod.object(creatorShape)
+export const UpdateCreatorResponse = zod.object({
+  "address": zod.string(),
+  "label": zod.string(),
+  "enabled": zod.boolean(),
+  "addedAt": zod.coerce.date(),
+  "totalSniped": zod.coerce.number(),
+  "zoraProfileUrl": zod.string().nullish(),
+  "buyAmountEth": zod.string().nullish().describe('Per-wallet ETH buy amount. null = use global config'),
+  "slippagePercent": zod.coerce.number().nullish().describe('Per-wallet slippage %. null = use global config'),
+  "maxGasGwei": zod.coerce.number().nullish().describe('Per-wallet max gas in Gwei. null = use global config'),
+  "autoSell": zod.boolean().nullish().describe('Per-wallet auto sell override. null = use global config'),
+  "takeProfitPercent": zod.coerce.number().nullish().describe('Per-wallet take profit %. null resets to global'),
+  "stopLossPercent": zod.coerce.number().nullish().describe('Per-wallet stop loss %. null resets to global'),
+  "maxBuysPerDay": zod.coerce.number().nullish().describe('Per-wallet max buys per day. null resets to global')
+})
 
 
 /**
@@ -189,7 +213,7 @@ export const ListTradesQueryParams = zod.object({
 })
 
 export const ListTradesResponseItem = zod.object({
-  "id": zod.number(),
+  "id": zod.coerce.number(),
   "txHash": zod.string().nullish(),
   "tokenAddress": zod.string(),
   "tokenName": zod.string(),
@@ -200,11 +224,14 @@ export const ListTradesResponseItem = zod.object({
   "gasUsedEth": zod.string().nullish(),
   "timestamp": zod.coerce.date(),
   "status": zod.enum(['pending', 'confirmed', 'failed', 'sold', 'skipped']),
+  "source": zod.enum(['sniper', 'manual']),
+  "takeProfitPercent": zod.string().nullish(),
+  "stopLossPercent": zod.string().nullish(),
+  "entryPriceEth": zod.string().nullish(),
   "sellTxHash": zod.string().nullish(),
   "sellAmountEth": zod.string().nullish(),
   "pnlEth": zod.string().nullish(),
-  "blockNumber": zod.number().nullish(),
-    "failReason": zod.string().nullish()
+  "blockNumber": zod.coerce.number().nullish()
 })
 export const ListTradesResponse = zod.array(ListTradesResponseItem)
 
@@ -213,18 +240,103 @@ export const ListTradesResponse = zod.array(ListTradesResponseItem)
  * @summary Get trading statistics
  */
 export const GetTradeStatsResponse = zod.object({
-  "totalTrades": zod.number(),
-  "successfulTrades": zod.number(),
-  "failedTrades": zod.number(),
+  "totalTrades": zod.coerce.number(),
+  "successfulTrades": zod.coerce.number(),
+  "failedTrades": zod.coerce.number(),
   "totalEthSpent": zod.string(),
   "totalEthRecovered": zod.string(),
   "totalPnlEth": zod.string(),
-  "winCount": zod.number(),
-  "lossCount": zod.number(),
-  "winRatePercent": zod.number().optional(),
+  "winCount": zod.coerce.number(),
+  "lossCount": zod.coerce.number(),
+  "winRatePercent": zod.coerce.number().optional(),
   "avgBuyAmountEth": zod.string().optional(),
-  "todayTrades": zod.number().optional(),
+  "todayTrades": zod.coerce.number().optional(),
   "todayEthSpent": zod.string().optional()
+})
+
+
+/**
+ * @summary Execute a manual buy for a given token address
+ */
+export const ManualBuyBody = zod.object({
+  "tokenAddress": zod.string().describe('EVM contract address of the Zora token to buy'),
+  "buyAmountEth": zod.string().describe('ETH amount to spend, e.g. \"0.05\"'),
+  "slippagePercent": zod.number().describe('Max slippage in percent, e.g. 5 = 5%'),
+  "takeProfitPercent": zod.number().nullish().describe('Auto-sell when P&L reaches this %. null = disabled'),
+  "stopLossPercent": zod.number().nullish().describe('Auto-sell when loss reaches this %. null = disabled')
+})
+
+export const ManualBuyResponse = zod.object({
+  "id": zod.coerce.number(),
+  "txHash": zod.string().nullish(),
+  "tokenAddress": zod.string(),
+  "tokenName": zod.string(),
+  "tokenSymbol": zod.string(),
+  "creatorAddress": zod.string(),
+  "buyAmountEth": zod.string(),
+  "tokenAmount": zod.string().nullish(),
+  "gasUsedEth": zod.string().nullish(),
+  "timestamp": zod.coerce.date(),
+  "status": zod.enum(['pending', 'confirmed', 'failed', 'sold', 'skipped']),
+  "source": zod.enum(['sniper', 'manual']),
+  "takeProfitPercent": zod.string().nullish(),
+  "stopLossPercent": zod.string().nullish(),
+  "entryPriceEth": zod.string().nullish(),
+  "sellTxHash": zod.string().nullish(),
+  "sellAmountEth": zod.string().nullish(),
+  "pnlEth": zod.string().nullish(),
+  "blockNumber": zod.coerce.number().nullish()
+})
+
+
+/**
+ * @summary List open manual positions (manual buys not yet sold)
+ */
+export const ListPositionsResponseItem = zod.object({
+  "trade": zod.object({
+  "id": zod.coerce.number(),
+  "txHash": zod.string().nullish(),
+  "tokenAddress": zod.string(),
+  "tokenName": zod.string(),
+  "tokenSymbol": zod.string(),
+  "creatorAddress": zod.string(),
+  "buyAmountEth": zod.string(),
+  "tokenAmount": zod.string().nullish(),
+  "gasUsedEth": zod.string().nullish(),
+  "timestamp": zod.coerce.date(),
+  "status": zod.enum(['pending', 'confirmed', 'failed', 'sold', 'skipped']),
+  "source": zod.enum(['sniper', 'manual']),
+  "takeProfitPercent": zod.string().nullish(),
+  "stopLossPercent": zod.string().nullish(),
+  "entryPriceEth": zod.string().nullish(),
+  "sellTxHash": zod.string().nullish(),
+  "sellAmountEth": zod.string().nullish(),
+  "pnlEth": zod.string().nullish(),
+  "blockNumber": zod.coerce.number().nullish()
+}),
+  "currentBalanceTokens": zod.string().describe('Current on-chain token balance for this wallet'),
+  "entryPriceEth": zod.string().describe('ETH paid per token at entry'),
+  "currentValueEth": zod.string().describe('Estimated current value in ETH (balance \* current price)'),
+  "pnlPercent": zod.coerce.number().describe('Unrealised P&L in percent relative to entry')
+})
+export const ListPositionsResponse = zod.array(ListPositionsResponseItem)
+
+
+/**
+ * @summary Get on-chain token info (name, symbol, price estimate, MC)
+ */
+export const GetTokenInfoParams = zod.object({
+  "address": zod.coerce.string()
+})
+
+export const GetTokenInfoResponse = zod.object({
+  "address": zod.string(),
+  "name": zod.string(),
+  "symbol": zod.string(),
+  "totalSupply": zod.string().describe('Human-readable total supply (18 decimals divided)'),
+  "walletBalance": zod.string().describe('Current wallet balance in tokens'),
+  "priceEth": zod.string().describe('Estimated ETH price per token (from small-buy simulation)'),
+  "mcEth": zod.string().describe('Estimated market cap in ETH')
 })
 
 
@@ -233,47 +345,65 @@ export const GetTradeStatsResponse = zod.object({
  */
 export const GetDashboardResponse = zod.object({
   "botStatus": zod.object({
-    "running": zod.boolean(),
-    "walletAddress": zod.string().nullable(),
-    "walletBalanceEth": zod.string().nullable(),
-    "totalTrades": zod.number(),
-    "snipedToday": zod.number().optional(),
-    "uptimeSeconds": zod.number(),
-    "lastEventAt": zod.string().nullish(),
-    "network": zod.string().optional()
-  }),
+  "running": zod.boolean(),
+  "walletAddress": zod.string().nullable(),
+  "walletBalanceEth": zod.string().nullable(),
+  "totalTrades": zod.coerce.number(),
+  "snipedToday": zod.coerce.number().optional(),
+  "uptimeSeconds": zod.coerce.number(),
+  "lastEventAt": zod.string().nullish(),
+  "network": zod.string().optional()
+}),
   "recentTrades": zod.array(zod.object({
-    "id": zod.number(),
-    "txHash": zod.string().nullish(),
-    "tokenAddress": zod.string(),
-    "tokenName": zod.string(),
-    "tokenSymbol": zod.string(),
-    "creatorAddress": zod.string(),
-    "buyAmountEth": zod.string(),
-    "tokenAmount": zod.string().nullish(),
-    "gasUsedEth": zod.string().nullish(),
-    "timestamp": zod.coerce.date(),
-    "status": zod.enum(['pending', 'confirmed', 'failed', 'sold', 'skipped']),
-    "sellTxHash": zod.string().nullish(),
-    "sellAmountEth": zod.string().nullish(),
-    "pnlEth": zod.string().nullish(),
-    "blockNumber": zod.number().nullish(),
-    "failReason": zod.string().nullish()
-  })),
+  "id": zod.coerce.number(),
+  "txHash": zod.string().nullish(),
+  "tokenAddress": zod.string(),
+  "tokenName": zod.string(),
+  "tokenSymbol": zod.string(),
+  "creatorAddress": zod.string(),
+  "buyAmountEth": zod.string(),
+  "tokenAmount": zod.string().nullish(),
+  "gasUsedEth": zod.string().nullish(),
+  "timestamp": zod.coerce.date(),
+  "status": zod.enum(['pending', 'confirmed', 'failed', 'sold', 'skipped']),
+  "source": zod.enum(['sniper', 'manual']),
+  "takeProfitPercent": zod.string().nullish(),
+  "stopLossPercent": zod.string().nullish(),
+  "entryPriceEth": zod.string().nullish(),
+  "sellTxHash": zod.string().nullish(),
+  "sellAmountEth": zod.string().nullish(),
+  "pnlEth": zod.string().nullish(),
+  "blockNumber": zod.coerce.number().nullish()
+})),
   "stats": zod.object({
-    "totalTrades": zod.number(),
-    "successfulTrades": zod.number(),
-    "failedTrades": zod.number(),
-    "totalEthSpent": zod.string(),
-    "totalEthRecovered": zod.string(),
-    "totalPnlEth": zod.string(),
-    "winCount": zod.number(),
-    "lossCount": zod.number(),
-    "winRatePercent": zod.number().optional(),
-    "avgBuyAmountEth": zod.string().optional(),
-    "todayTrades": zod.number().optional(),
-    "todayEthSpent": zod.string().optional()
-  }),
-  "topCreators": zod.array(zod.object(creatorShape))
+  "totalTrades": zod.coerce.number(),
+  "successfulTrades": zod.coerce.number(),
+  "failedTrades": zod.coerce.number(),
+  "totalEthSpent": zod.string(),
+  "totalEthRecovered": zod.string(),
+  "totalPnlEth": zod.string(),
+  "winCount": zod.coerce.number(),
+  "lossCount": zod.coerce.number(),
+  "winRatePercent": zod.coerce.number().optional(),
+  "avgBuyAmountEth": zod.string().optional(),
+  "todayTrades": zod.coerce.number().optional(),
+  "todayEthSpent": zod.string().optional()
+}),
+  "topCreators": zod.array(zod.object({
+  "address": zod.string(),
+  "label": zod.string(),
+  "enabled": zod.boolean(),
+  "addedAt": zod.coerce.date(),
+  "totalSniped": zod.coerce.number(),
+  "zoraProfileUrl": zod.string().nullish(),
+  "buyAmountEth": zod.string().nullish().describe('Per-wallet ETH buy amount. null = use global config'),
+  "slippagePercent": zod.coerce.number().nullish().describe('Per-wallet slippage %. null = use global config'),
+  "maxGasGwei": zod.coerce.number().nullish().describe('Per-wallet max gas in Gwei. null = use global config'),
+  "autoSell": zod.boolean().nullish().describe('Per-wallet auto sell override. null = use global config'),
+  "takeProfitPercent": zod.coerce.number().nullish().describe('Per-wallet take profit %. null resets to global'),
+  "stopLossPercent": zod.coerce.number().nullish().describe('Per-wallet stop loss %. null resets to global'),
+  "maxBuysPerDay": zod.coerce.number().nullish().describe('Per-wallet max buys per day. null resets to global')
+}))
 })
+
 

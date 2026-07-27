@@ -5,6 +5,7 @@
  * Zora Sniper API - Auto trade bot for Zora Coins on Base
  * OpenAPI spec version: 0.1.0
  */
+import type { TradeSource } from './tradeSource';
 import type { TradeStatus } from './tradeStatus';
 
 export interface Trade {
@@ -22,8 +23,13 @@ export interface Trade {
   gasUsedEth?: string | null;
   timestamp: Date;
   status: TradeStatus;
+  source: TradeSource;
   /** @nullable */
-  failReason?: string | null;
+  takeProfitPercent?: string | null;
+  /** @nullable */
+  stopLossPercent?: string | null;
+  /** @nullable */
+  entryPriceEth?: string | null;
   /** @nullable */
   sellTxHash?: string | null;
   /** @nullable */

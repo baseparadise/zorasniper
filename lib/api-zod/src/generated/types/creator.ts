@@ -14,18 +14,39 @@ export interface Creator {
   totalSniped: number;
   /** @nullable */
   zoraProfileUrl?: string | null;
-  /** Per-wallet override. null = use global config @nullable */
+  /**
+     * Per-wallet ETH buy amount. null = use global config
+     * @nullable
+     */
   buyAmountEth?: string | null;
-  /** @nullable */
+  /**
+     * Per-wallet slippage %. null = use global config
+     * @nullable
+     */
   slippagePercent?: number | null;
-  /** @nullable */
+  /**
+     * Per-wallet max gas in Gwei. null = use global config
+     * @nullable
+     */
   maxGasGwei?: number | null;
-  /** @nullable */
+  /**
+     * Per-wallet auto sell override. null = use global config
+     * @nullable
+     */
   autoSell?: boolean | null;
-  /** @nullable */
+  /**
+     * Per-wallet take profit %. null resets to global
+     * @nullable
+     */
   takeProfitPercent?: number | null;
-  /** @nullable */
+  /**
+     * Per-wallet stop loss %. null resets to global
+     * @nullable
+     */
   stopLossPercent?: number | null;
-  /** Per-wallet max buys per day. null = use global @nullable */
+  /**
+     * Per-wallet max buys per day. null resets to global
+     * @nullable
+     */
   maxBuysPerDay?: number | null;
 }

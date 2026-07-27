@@ -28,6 +28,7 @@ export interface BotStatus {
  */
 export type BotConfigWatchMode = typeof BotConfigWatchMode[keyof typeof BotConfigWatchMode];
 
+
 export const BotConfigWatchMode = {
   whitelist: 'whitelist',
   all: 'all',
@@ -50,11 +51,15 @@ export interface BotConfig {
   takeProfitPercent?: number | null;
   /** @nullable */
   stopLossPercent?: number | null;
-  /** Global max buys per creator wallet per day. null = no limit @nullable */
+  /**
+     * Global max buys per creator wallet per day. null = no limit
+     * @nullable
+     */
   maxBuysPerDay?: number | null;
 }
 
 export type ConfigUpdateWatchMode = typeof ConfigUpdateWatchMode[keyof typeof ConfigUpdateWatchMode];
+
 
 export const ConfigUpdateWatchMode = {
   whitelist: 'whitelist',
@@ -74,7 +79,10 @@ export interface ConfigUpdate {
   takeProfitPercent?: number | null;
   /** @nullable */
   stopLossPercent?: number | null;
-  /** Global max buys per creator wallet per day. null = no limit @nullable */
+  /**
+     * Global max buys per creator wallet per day. null = no limit
+     * @nullable
+     */
   maxBuysPerDay?: number | null;
 }
 
@@ -86,33 +94,52 @@ export interface Creator {
   totalSniped: number;
   /** @nullable */
   zoraProfileUrl?: string | null;
-  /** Per-wallet override — null means use global config @nullable */
+  /**
+     * Per-wallet ETH buy amount. null = use global config
+     * @nullable
+     */
   buyAmountEth?: string | null;
-  /** @nullable */
+  /**
+     * Per-wallet slippage %. null = use global config
+     * @nullable
+     */
   slippagePercent?: number | null;
-  /** @nullable */
+  /**
+     * Per-wallet max gas in Gwei. null = use global config
+     * @nullable
+     */
   maxGasGwei?: number | null;
-  /** @nullable */
+  /**
+     * Per-wallet auto sell override. null = use global config
+     * @nullable
+     */
   autoSell?: boolean | null;
-  /** @nullable */
+  /**
+     * Per-wallet take profit %. null resets to global
+     * @nullable
+     */
   takeProfitPercent?: number | null;
-  /** @nullable */
+  /**
+     * Per-wallet stop loss %. null resets to global
+     * @nullable
+     */
   stopLossPercent?: number | null;
-  /** Per-wallet max buys per day. null = use global @nullable */
+  /**
+     * Per-wallet max buys per day. null resets to global
+     * @nullable
+     */
   maxBuysPerDay?: number | null;
 }
 
 export interface CreatorInput {
-  /** Ethereum address of the creator */
   address: string;
-  /** Optional display name/label */
   label?: string;
 }
 
 export interface CreatorPatch {
   label?: string;
   enabled?: boolean;
-  /** Per-wallet override — null resets to global @nullable */
+  /** @nullable */
   buyAmountEth?: string | null;
   /** @nullable */
   slippagePercent?: number | null;
@@ -120,13 +147,41 @@ export interface CreatorPatch {
   maxGasGwei?: number | null;
   /** @nullable */
   autoSell?: boolean | null;
-  /** @nullable */
+  /**
+     * Per-wallet take profit %. null resets to global
+     * @nullable
+     */
   takeProfitPercent?: number | null;
-  /** @nullable */
+  /**
+     * Per-wallet stop loss %. null resets to global
+     * @nullable
+     */
   stopLossPercent?: number | null;
-  /** Per-wallet max buys per day. null resets to global @nullable */
+  /**
+     * Per-wallet max buys per day. null resets to global
+     * @nullable
+     */
   maxBuysPerDay?: number | null;
 }
+
+export type TradeStatus = typeof TradeStatus[keyof typeof TradeStatus];
+
+
+export const TradeStatus = {
+  pending: 'pending',
+  confirmed: 'confirmed',
+  failed: 'failed',
+  sold: 'sold',
+  skipped: 'skipped',
+} as const;
+
+export type TradeSource = typeof TradeSource[keyof typeof TradeSource];
+
+
+export const TradeSource = {
+  sniper: 'sniper',
+  manual: 'manual',
+} as const;
 
 export interface Trade {
   id: number;
@@ -143,8 +198,13 @@ export interface Trade {
   gasUsedEth?: string | null;
   timestamp: string;
   status: TradeStatus;
+  source: TradeSource;
   /** @nullable */
-  failReason?: string | null;
+  takeProfitPercent?: string | null;
+  /** @nullable */
+  stopLossPercent?: string | null;
+  /** @nullable */
+  entryPriceEth?: string | null;
   /** @nullable */
   sellTxHash?: string | null;
   /** @nullable */
@@ -155,31 +215,50 @@ export interface Trade {
   blockNumber?: number | null;
 }
 
-export type TradeStatus = typeof TradeStatus[keyof typeof TradeStatus];
-
-export const TradeStatus = {
-  pending: 'pending',
-  confirmed: 'confirmed',
-  failed: 'failed',
-  sold: 'sold',
-  skipped: 'skipped',
-} as const;
-
-export type ListTradesParams = {
-  limit?: number;
-  offset?: number;
-  status?: ListTradesStatus;
+export interface ManualBuyRequest {
+  /** EVM contract address of the Zora token to buy */
+  tokenAddress: string;
+  /** ETH amount to spend, e.g. "0.05" */
+  buyAmountEth: string;
+  /** Max slippage in percent, e.g. 5 = 5% */
+  slippagePercent: number;
+  /**
+     * Auto-sell when P&L reaches this %. null = disabled
+     * @nullable
+     */
+  takeProfitPercent?: number | null;
+  /**
+     * Auto-sell when loss reaches this %. null = disabled
+     * @nullable
+     */
+  stopLossPercent?: number | null;
 }
 
-export type ListTradesStatus = typeof ListTradesStatus[keyof typeof ListTradesStatus];
+export interface Position {
+  trade: Trade;
+  /** Current on-chain token balance for this wallet */
+  currentBalanceTokens: string;
+  /** ETH paid per token at entry */
+  entryPriceEth: string;
+  /** Estimated current value in ETH (balance * current price) */
+  currentValueEth: string;
+  /** Unrealised P&L in percent relative to entry */
+  pnlPercent: number;
+}
 
-export const ListTradesStatus = {
-  pending: 'pending',
-  confirmed: 'confirmed',
-  failed: 'failed',
-  sold: 'sold',
-  skipped: 'skipped',
-} as const;
+export interface TokenInfo {
+  address: string;
+  name: string;
+  symbol: string;
+  /** Human-readable total supply (18 decimals divided) */
+  totalSupply: string;
+  /** Current wallet balance in tokens */
+  walletBalance: string;
+  /** Estimated ETH price per token (from small-buy simulation) */
+  priceEth: string;
+  /** Estimated market cap in ETH */
+  mcEth: string;
+}
 
 export interface TradeStats {
   totalTrades: number;
@@ -202,3 +281,21 @@ export interface DashboardData {
   stats: TradeStats;
   topCreators: Creator[];
 }
+
+export type ListTradesParams = {
+limit?: number;
+offset?: number;
+status?: ListTradesStatus;
+};
+
+export type ListTradesStatus = typeof ListTradesStatus[keyof typeof ListTradesStatus];
+
+
+export const ListTradesStatus = {
+  pending: 'pending',
+  confirmed: 'confirmed',
+  failed: 'failed',
+  sold: 'sold',
+  skipped: 'skipped',
+} as const;
+

@@ -288,7 +288,7 @@ const ManualBuyBody = z.object({
   stopLossPercent: z.number().nullable().optional(),
 });
 
-router.post("/manual/buy", async (req, res): Promise<void> => {
+router.post("/trades/manual-buy", async (req, res): Promise<void> => {
   const parsed = ManualBuyBody.safeParse(req.body);
   if (!parsed.success) {
     res.status(400).json({ error: "Invalid input", details: parsed.error.issues });
@@ -369,7 +369,8 @@ router.post("/manual/buy", async (req, res): Promise<void> => {
     }
   });
 
-  res.json({ tradeId: tradeRow.id, status: "pending", tokenName, tokenSymbol });
+  // Return the full Trade object so the client can render it immediately
+  res.status(201).json(tradeRow);
 });
 
 // ── Simulate (dry-run, zero ETH spent) ─────────────────────────────────────
@@ -477,10 +478,10 @@ router.post("/manual/simulate", async (req, res): Promise<void> => {
 
 // ── Token info ─────────────────────────────────────────────────────────────
 
-router.get("/manual/token-info", async (req, res): Promise<void> => {
-  const address = req.query.address as string | undefined;
+router.get("/token/:address", async (req, res): Promise<void> => {
+  const address = req.params.address as string | undefined;
   if (!address || !/^0x[0-9a-fA-F]{40}$/.test(address)) {
-    res.status(400).json({ error: "address query param required (0x hex)" });
+    res.status(400).json({ error: "valid 0x token address required" });
     return;
   }
 
@@ -545,6 +546,83 @@ router.get("/manual/token-info", async (req, res): Promise<void> => {
     req.log.error({ err, address }, "Token info fetch failed");
     res.status(500).json({ error: "Failed to fetch token info from chain" });
   }
+});
+
+// ── Open positions ─────────────────────────────────────────────────────────
+
+router.get("/positions", async (_req, res): Promise<void> => {
+  const openTrades = await db
+    .select()
+    .from(tradesTable)
+    .where(and(eq(tradesTable.source, "manual"), eq(tradesTable.status, "confirmed")))
+    .orderBy(desc(tradesTable.timestamp));
+
+  if (openTrades.length === 0) {
+    res.json([]);
+    return;
+  }
+
+  const publicClient = makePublicClient();
+  let walletAddress: Address;
+  try {
+    walletAddress = privateKeyToAccount(getWalletKey()).address;
+  } catch {
+    walletAddress = ZERO_ADDRESS;
+  }
+
+  const positions = await Promise.all(
+    openTrades.map(async (trade) => {
+      const addr = trade.tokenAddress as Address;
+
+      // Current on-chain token balance
+      let currentBalanceTokens = "0";
+      try {
+        const rawBal = await publicClient.readContract({
+          address: addr,
+          abi: ERC20_ABI,
+          functionName: "balanceOf",
+          args: [walletAddress],
+        });
+        currentBalanceTokens = formatUnits(rawBal, 18);
+      } catch {
+        /* keep 0 */
+      }
+
+      const entryPriceEth = trade.entryPriceEth ?? "0";
+      const entryPriceNum = parseFloat(entryPriceEth);
+      const balNum = parseFloat(currentBalanceTokens);
+
+      let currentValueEth = "0";
+      let pnlPercent = 0;
+
+      if (balNum > 0 && entryPriceNum > 0) {
+        try {
+          const PROBE_ETH = parseEther("0.0001");
+          const { result: probeTokens } = await publicClient.simulateContract({
+            address: addr,
+            abi: ZORA_COIN_BUY_ABI,
+            functionName: "buy",
+            args: [walletAddress, walletAddress, ZERO_ADDRESS, "price-probe", 0, 0n, 0n],
+            value: PROBE_ETH,
+            account: walletAddress,
+          });
+          if (probeTokens > 0n) {
+            const currentPrice = 0.0001 / parseFloat(formatUnits(probeTokens, 18));
+            const currentValue = balNum * currentPrice;
+            currentValueEth = currentValue.toFixed(6);
+            const buyEth = parseFloat(trade.buyAmountEth);
+            pnlPercent = buyEth > 0 ? ((currentValue - buyEth) / buyEth) * 100 : 0;
+          }
+        } catch {
+          /* RPC unavailable — keep defaults */
+        }
+      }
+
+      return { trade, currentBalanceTokens, entryPriceEth, currentValueEth, pnlPercent };
+    }),
+  );
+
+  res.json(positions);
 });
 
 // ── Manual trades list ─────────────────────────────────────────────────────

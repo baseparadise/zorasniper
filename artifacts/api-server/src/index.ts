@@ -77,6 +77,24 @@ async function applyMigrations(): Promise<void> {
       name: "003_creators_zora_profile_url",
       sql: `ALTER TABLE creators ADD COLUMN IF NOT EXISTS zora_profile_url TEXT`,
     },
+    {
+      // Added extended trade columns for sell tracking and manual buy features.
+      // These columns exist in the TypeScript schema but were never migrated,
+      // so every SELECT on tradesTable (which enumerates columns explicitly)
+      // was failing with DrizzleQueryError "column does not exist".
+      name: "004_trades_extended_fields",
+      sql: `
+        ALTER TABLE trades
+          ADD COLUMN IF NOT EXISTS sell_tx_hash       TEXT,
+          ADD COLUMN IF NOT EXISTS sell_amount_eth    TEXT,
+          ADD COLUMN IF NOT EXISTS pnl_eth            TEXT,
+          ADD COLUMN IF NOT EXISTS block_number       BIGINT,
+          ADD COLUMN IF NOT EXISTS source             TEXT NOT NULL DEFAULT 'sniper',
+          ADD COLUMN IF NOT EXISTS take_profit_percent TEXT,
+          ADD COLUMN IF NOT EXISTS stop_loss_percent  TEXT,
+          ADD COLUMN IF NOT EXISTS entry_price_eth    TEXT
+      `,
+    },
   ];
 
   let ran = 0;

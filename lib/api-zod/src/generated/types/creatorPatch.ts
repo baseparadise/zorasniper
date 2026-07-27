@@ -9,7 +9,7 @@
 export interface CreatorPatch {
   label?: string;
   enabled?: boolean;
-  /** Per-wallet override. null resets to global @nullable */
+  /** @nullable */
   buyAmountEth?: string | null;
   /** @nullable */
   slippagePercent?: number | null;
@@ -17,10 +17,19 @@ export interface CreatorPatch {
   maxGasGwei?: number | null;
   /** @nullable */
   autoSell?: boolean | null;
-  /** @nullable */
+  /**
+     * Per-wallet take profit %. null resets to global
+     * @nullable
+     */
   takeProfitPercent?: number | null;
-  /** @nullable */
+  /**
+     * Per-wallet stop loss %. null resets to global
+     * @nullable
+     */
   stopLossPercent?: number | null;
-  /** Per-wallet max buys per day. null resets to global @nullable */
+  /**
+     * Per-wallet max buys per day. null resets to global
+     * @nullable
+     */
   maxBuysPerDay?: number | null;
 }

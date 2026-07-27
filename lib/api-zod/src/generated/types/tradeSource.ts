@@ -6,7 +6,10 @@
  * OpenAPI spec version: 0.1.0
  */
 
-export interface CreatorInput {
-  address: string;
-  label?: string;
-}
+export type TradeSource = typeof TradeSource[keyof typeof TradeSource];
+
+
+export const TradeSource = {
+  sniper: 'sniper',
+  manual: 'manual',
+} as const;

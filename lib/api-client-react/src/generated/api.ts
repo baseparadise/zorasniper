@@ -29,6 +29,9 @@ import type {
   DashboardData,
   HealthStatus,
   ListTradesParams,
+  ManualBuyRequest,
+  Position,
+  TokenInfo,
   Trade,
   TradeStats
 } from './api.schemas';
@@ -732,7 +735,7 @@ export const getUpdateCreatorUrl = (address: string,) => {
 }
 
 /**
- * @summary Update creator label or enabled state
+ * @summary Update creator label, enabled state, or per-wallet sniper settings
  */
 export const updateCreator = async (address: string,
     creatorPatch: CreatorPatch, options?: RequestInit): Promise<Creator> => {
@@ -782,7 +785,7 @@ const {mutation: mutationOptions, request: requestOptions} = options ?
     export type UpdateCreatorMutationError = ErrorType<unknown>
 
     /**
- * @summary Update creator label or enabled state
+ * @summary Update creator label, enabled state, or per-wallet sniper settings
  */
 export const useUpdateCreator = <TError = ErrorType<unknown>,
     TContext = unknown>(options?: { mutation?:UseMutationOptions<Awaited<ReturnType<typeof updateCreator>>, TError,{address: string;data: BodyType<CreatorPatch>}, TContext>, request?: SecondParameter<typeof customFetch>}
@@ -944,6 +947,231 @@ export function useGetTradeStats<TData = Awaited<ReturnType<typeof getTradeStats
  ):  UseQueryResult<TData, TError> & { queryKey: QueryKey } {
 
   const queryOptions = getGetTradeStatsQueryOptions(options)
+
+  const query = useQuery(queryOptions) as  UseQueryResult<TData, TError> & { queryKey: QueryKey };
+
+  return withQueryKey(query, queryOptions.queryKey);
+}
+
+
+
+
+
+
+
+export const getManualBuyUrl = () => {
+
+
+
+
+  return `/api/trades/manual-buy`
+}
+
+/**
+ * @summary Execute a manual buy for a given token address
+ */
+export const manualBuy = async (manualBuyRequest: ManualBuyRequest, options?: RequestInit): Promise<Trade> => {
+
+  return customFetch<Trade>(getManualBuyUrl(),
+  {
+    ...options,
+    method: 'POST',
+    headers: { 'Content-Type': 'application/json', ...options?.headers },
+    body: JSON.stringify(manualBuyRequest)
+  }
+);}
+
+
+
+
+
+export const getManualBuyMutationOptions = <TError = ErrorType<void>,
+    TContext = unknown>(options?: { mutation?:UseMutationOptions<Awaited<ReturnType<typeof manualBuy>>, TError,{data: BodyType<ManualBuyRequest>}, TContext>, request?: SecondParameter<typeof customFetch>}
+): UseMutationOptions<Awaited<ReturnType<typeof manualBuy>>, TError,{data: BodyType<ManualBuyRequest>}, TContext> => {
+
+const mutationKey = ['manualBuy'];
+const {mutation: mutationOptions, request: requestOptions} = options ?
+      options.mutation && 'mutationKey' in options.mutation && options.mutation.mutationKey ?
+      options
+      : {...options, mutation: {...options.mutation, mutationKey}}
+      : {mutation: { mutationKey, }, request: undefined};
+
+
+
+
+      const mutationFn: MutationFunction<Awaited<ReturnType<typeof manualBuy>>, {data: BodyType<ManualBuyRequest>}> = (props) => {
+          const {data} = props ?? {};
+
+          return  manualBuy(data,requestOptions)
+        }
+
+
+
+
+
+
+  return  { mutationFn, ...mutationOptions }}
+
+    export type ManualBuyMutationResult = NonNullable<Awaited<ReturnType<typeof manualBuy>>>
+    export type ManualBuyMutationBody = BodyType<ManualBuyRequest>
+    export type ManualBuyMutationError = ErrorType<void>
+
+    /**
+ * @summary Execute a manual buy for a given token address
+ */
+export const useManualBuy = <TError = ErrorType<void>,
+    TContext = unknown>(options?: { mutation?:UseMutationOptions<Awaited<ReturnType<typeof manualBuy>>, TError,{data: BodyType<ManualBuyRequest>}, TContext>, request?: SecondParameter<typeof customFetch>}
+ ): UseMutationResult<
+        Awaited<ReturnType<typeof manualBuy>>,
+        TError,
+        {data: BodyType<ManualBuyRequest>},
+        TContext
+      > => {
+      return useMutation(getManualBuyMutationOptions(options));
+    }
+
+export const getListPositionsUrl = () => {
+
+
+
+
+  return `/api/positions`
+}
+
+/**
+ * @summary List open manual positions (manual buys not yet sold)
+ */
+export const listPositions = async ( options?: RequestInit): Promise<Position[]> => {
+
+  return customFetch<Position[]>(getListPositionsUrl(),
+  {
+    ...options,
+    method: 'GET'
+
+
+  }
+);}
+
+
+
+
+
+export const getListPositionsQueryKey = () => {
+    return [
+    `/api/positions`
+    ] as const;
+    }
+
+
+export const getListPositionsQueryOptions = <TData = Awaited<ReturnType<typeof listPositions>>, TError = ErrorType<unknown>>( options?: { query?:UseQueryOptions<Awaited<ReturnType<typeof listPositions>>, TError, TData>, request?: SecondParameter<typeof customFetch>}
+) => {
+
+const {query: queryOptions, request: requestOptions} = options ?? {};
+
+  const queryKey =  queryOptions?.queryKey ?? getListPositionsQueryKey();
+
+
+
+    const queryFn: QueryFunction<Awaited<ReturnType<typeof listPositions>>> = ({ signal }) => listPositions({ signal, ...requestOptions });
+
+
+
+
+
+   return  { queryKey, queryFn, ...queryOptions} as UseQueryOptions<Awaited<ReturnType<typeof listPositions>>, TError, TData> & { queryKey: QueryKey }
+}
+
+export type ListPositionsQueryResult = NonNullable<Awaited<ReturnType<typeof listPositions>>>
+export type ListPositionsQueryError = ErrorType<unknown>
+
+
+/**
+ * @summary List open manual positions (manual buys not yet sold)
+ */
+
+export function useListPositions<TData = Awaited<ReturnType<typeof listPositions>>, TError = ErrorType<unknown>>(
+  options?: { query?:UseQueryOptions<Awaited<ReturnType<typeof listPositions>>, TError, TData>, request?: SecondParameter<typeof customFetch>}
+
+ ):  UseQueryResult<TData, TError> & { queryKey: QueryKey } {
+
+  const queryOptions = getListPositionsQueryOptions(options)
+
+  const query = useQuery(queryOptions) as  UseQueryResult<TData, TError> & { queryKey: QueryKey };
+
+  return withQueryKey(query, queryOptions.queryKey);
+}
+
+
+
+
+
+
+
+export const getGetTokenInfoUrl = (address: string,) => {
+
+
+
+
+  return `/api/token/${address}`
+}
+
+/**
+ * @summary Get on-chain token info (name, symbol, price estimate, MC)
+ */
+export const getTokenInfo = async (address: string, options?: RequestInit): Promise<TokenInfo> => {
+
+  return customFetch<TokenInfo>(getGetTokenInfoUrl(address),
+  {
+    ...options,
+    method: 'GET'
+
+
+  }
+);}
+
+
+
+
+
+export const getGetTokenInfoQueryKey = (address: string,) => {
+    return [
+    `/api/token/${address}`
+    ] as const;
+    }
+
+
+export const getGetTokenInfoQueryOptions = <TData = Awaited<ReturnType<typeof getTokenInfo>>, TError = ErrorType<void>>(address: string, options?: { query?:UseQueryOptions<Awaited<ReturnType<typeof getTokenInfo>>, TError, TData>, request?: SecondParameter<typeof customFetch>}
+) => {
+
+const {query: queryOptions, request: requestOptions} = options ?? {};
+
+  const queryKey =  queryOptions?.queryKey ?? getGetTokenInfoQueryKey(address);
+
+
+
+    const queryFn: QueryFunction<Awaited<ReturnType<typeof getTokenInfo>>> = ({ signal }) => getTokenInfo(address, { signal, ...requestOptions });
+
+
+
+
+
+   return  { queryKey, queryFn, enabled: address !== null && address !== undefined, ...queryOptions} as UseQueryOptions<Awaited<ReturnType<typeof getTokenInfo>>, TError, TData> & { queryKey: QueryKey }
+}
+
+export type GetTokenInfoQueryResult = NonNullable<Awaited<ReturnType<typeof getTokenInfo>>>
+export type GetTokenInfoQueryError = ErrorType<void>
+
+
+/**
+ * @summary Get on-chain token info (name, symbol, price estimate, MC)
+ */
+
+export function useGetTokenInfo<TData = Awaited<ReturnType<typeof getTokenInfo>>, TError = ErrorType<void>>(
+ address: string, options?: { query?:UseQueryOptions<Awaited<ReturnType<typeof getTokenInfo>>, TError, TData>, request?: SecondParameter<typeof customFetch>}
+
+ ):  UseQueryResult<TData, TError> & { queryKey: QueryKey } {
+
+  const queryOptions = getGetTokenInfoQueryOptions(address,options)
 
   const query = useQuery(queryOptions) as  UseQueryResult<TData, TError> & { queryKey: QueryKey };
 
