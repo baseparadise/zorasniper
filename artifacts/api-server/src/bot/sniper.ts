@@ -208,12 +208,12 @@ async function handleCoinCreated(params: {
 
   const creatorAddr = (payoutRecipient ?? caller).toLowerCase();
 
-  logger.info(
-    { coin, name, symbol, creator: creatorAddr, eventName },
-    "New Zora coin detected"
+  // Turunkan ke debug — event ini terjadi untuk SETIAP coin di factory Zora
+  // (bisa ratusan per jam). Info-level hanya setelah whitelist match di bawah.
+  logger.debug(
+    { coin, symbol, creator: creatorAddr, eventName },
+    "Factory event received"
   );
-  botState.update({ lastEventAt: new Date().toISOString() });
-  broadcast("event", { type: "coin_created", coin, name, symbol, creator: creatorAddr, eventName });
 
   const config = await loadConfig();
 
@@ -223,8 +223,7 @@ async function handleCoinCreated(params: {
   if (config.watchMode === "all") {
     shouldSnipe = true;
   } else {
-    // Fix: use case-insensitive lookup so checksum-formatted addresses in the
-    // DB still match the lowercased creatorAddr we derive from on-chain events.
+    // Case-insensitive lookup — checksum addresses di DB tetap match.
     const [found] = await db
       .select()
       .from(creatorsTable)
@@ -235,11 +234,17 @@ async function handleCoinCreated(params: {
   }
 
   if (!shouldSnipe) {
-    // Creator not in whitelist — silently ignore, no DB record needed.
-    // (already logged at debug level above)
-    logger.debug({ creatorAddr }, "Creator not in whitelist, skipping");
+    // Bukan target wallet — tidak perlu log apapun, langsung return.
     return;
   }
+
+  // ── Dari sini ke bawah: creator ada di whitelist ──────────────────────────
+  logger.info(
+    { coin, name, symbol, creator: creatorAddr, eventName },
+    "Target wallet detected new coin"
+  );
+  botState.update({ lastEventAt: new Date().toISOString() });
+  broadcast("event", { type: "coin_created", coin, name, symbol, creator: creatorAddr, eventName });
 
   // Bot is globally disabled — creator IS whitelisted but buy is paused.
   // Record this so the user can see detections even when the bot is off.
