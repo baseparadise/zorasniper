@@ -15,26 +15,7 @@ import { logger } from "../lib/logger";
 import { botState } from "./state";
 import { broadcast } from "./ws";
 
-// Minimal ABI to call buy() on a deployed Zora coin contract.
-const ZORA_COIN_ABI = [
-  {
-    type: "function",
-    name: "buy",
-    stateMutability: "payable",
-    inputs: [
-      { name: "recipient", type: "address" },
-      { name: "refundRecipient", type: "address" },
-      { name: "orderReferrer", type: "address" },
-      { name: "comment", type: "string" },
-      { name: "expectedMarketType", type: "uint8" },
-      { name: "minOrderSize", type: "uint256" },
-      { name: "sqrtPriceLimitX96", type: "uint160" },
-    ],
-    outputs: [{ name: "", type: "uint256" }],
-  },
-] as const;
-
-// ERC20 balanceOf ABI — used to accurately measure tokens received after buy.
+// ERC20 balanceOf ABI — used to measure tokens received after buy.
 const ERC20_BALANCE_ABI = [
   {
     type: "function",
@@ -45,17 +26,8 @@ const ERC20_BALANCE_ABI = [
   },
 ] as const;
 
-// Zora market types passed to buy() as a guard.
-// Passing the wrong type causes an on-chain revert.
-//   0 = BONDING_CURVE  (CoinCreated / V3 coins)
-//   1 = UNISWAP_V4     (CoinCreatedV4, CreatorCoinCreated, TrendCoinCreated)
-const MARKET_TYPE_BONDING_CURVE = 0;
-const MARKET_TYPE_UNISWAP_V4 = 1;
-const UNISWAP_V4_EVENTS = new Set([
-  "CoinCreatedV4",
-  "CreatorCoinCreated",
-  "TrendCoinCreated",
-]);
+// Zora Quote API endpoint
+const ZORA_QUOTE_API = "https://api-sdk.zora.engineering";
 
 export interface TradeParams {
   tokenAddress: Address;
@@ -65,8 +37,14 @@ export interface TradeParams {
   buyAmountEth: string;
   slippagePercent: number;
   maxGasGwei: number;
-  /** The factory event that triggered this snipe — used to derive expectedMarketType. */
+  /** The factory event that triggered this snipe (kept for logging). */
   eventName: string;
+}
+
+interface ZoraCall {
+  target: string;
+  data: string;
+  value: string;
 }
 
 function getRpcUrl(): string {
@@ -76,9 +54,8 @@ function getRpcUrl(): string {
 }
 
 /**
- * Bug #3 fix: ALCHEMY_RPC_URL is typically a wss:// URL (needed by sniper.ts
- * for WebSocket event watching). The HTTP clients in trader.ts must use an
- * https:// endpoint — convert the scheme instead of reusing the raw URL.
+ * ALCHEMY_RPC_URL is typically wss:// (needed by sniper.ts for WebSocket).
+ * HTTP clients must use https:// — convert the scheme.
  */
 function getHttpRpcUrl(): string {
   return getRpcUrl()
@@ -92,7 +69,73 @@ function getWalletKey(): `0x${string}` {
   return key.startsWith("0x") ? (key as `0x${string}`) : `0x${key}`;
 }
 
-const ZERO_ADDRESS = "0x0000000000000000000000000000000000000000" as Address;
+/**
+ * Fetch a buy quote from Zora Quote API.
+ * Retries up to 3 times with a 5-second delay — Zora pools need a few blocks
+ * after deployment before they are ready to quote.
+ */
+async function fetchZoraQuote(params: {
+  tokenAddress: string;
+  buyAmountWei: bigint;
+  slippage: number; // fractional, e.g. 0.05 for 5%
+  sender: string;
+}): Promise<ZoraCall> {
+  const apiKey = process.env.ZORA_API_KEY;
+  const headers: Record<string, string> = { "Content-Type": "application/json" };
+  if (apiKey) headers["x-api-key"] = apiKey;
+
+  const body = JSON.stringify({
+    chainId: base.id,
+    tokenIn: { type: "eth" },
+    tokenOut: { type: "erc20", address: params.tokenAddress.toLowerCase() },
+    amountIn: params.buyAmountWei.toString(),
+    slippage: params.slippage,
+    sender: params.sender.toLowerCase(),
+    recipient: params.sender.toLowerCase(),
+  });
+
+  for (let attempt = 1; attempt <= 3; attempt++) {
+    const res = await fetch(`${ZORA_QUOTE_API}/quote`, {
+      method: "POST",
+      headers,
+      body,
+    });
+
+    if (!res.ok) {
+      const text = await res.text().catch(() => "");
+      const isPoolNotReady =
+        text.includes("Cannot read properties of null") ||
+        text.includes("UNKNOWN") ||
+        res.status === 400;
+
+      if (isPoolNotReady && attempt < 3) {
+        logger.warn(
+          { attempt, status: res.status, body: text.slice(0, 100) },
+          `Zora quote attempt ${attempt}/3 — pool not ready yet, retry in 5s`
+        );
+        await new Promise((r) => setTimeout(r, 5000));
+        continue;
+      }
+
+      throw new Error(`Zora quote HTTP ${res.status}: ${text.slice(0, 200)}`);
+    }
+
+    const data = await res.json();
+    if (!data.call) {
+      if (attempt < 3) {
+        logger.warn({ attempt, data }, `Zora quote attempt ${attempt}/3 — no call field, retry in 5s`);
+        await new Promise((r) => setTimeout(r, 5000));
+        continue;
+      }
+      throw new Error(`Zora quote returned no call: ${JSON.stringify(data).slice(0, 200)}`);
+    }
+
+    logger.info({ attempt, target: data.call.target }, "Zora quote OK");
+    return data.call as ZoraCall;
+  }
+
+  throw new Error("Zora quote failed after 3 attempts — pool not ready or token invalid");
+}
 
 export async function executeBuy(params: TradeParams): Promise<void> {
   const {
@@ -106,13 +149,10 @@ export async function executeBuy(params: TradeParams): Promise<void> {
     eventName,
   } = params;
 
-  // Derive the correct market type from the factory event that created this coin.
-  // Passing the wrong value causes buy() to revert on-chain.
-  const expectedMarketType = UNISWAP_V4_EVENTS.has(eventName)
-    ? MARKET_TYPE_UNISWAP_V4
-    : MARKET_TYPE_BONDING_CURVE;
+  // slippagePercent is stored as e.g. 5.0 → Zora API expects 0.05
+  const slippage = slippagePercent / 100;
 
-  logger.info({ tokenAddress, tokenName, buyAmountEth, eventName, expectedMarketType }, "Executing buy");
+  logger.info({ tokenAddress, tokenName, buyAmountEth, eventName, slippage }, "Executing buy via Zora Quote API");
 
   const [tradeRow] = await db
     .insert(tradesTable)
@@ -130,74 +170,60 @@ export async function executeBuy(params: TradeParams): Promise<void> {
 
   try {
     const account = privateKeyToAccount(getWalletKey());
-    // Bug #3 fix: use HTTP URL for JSON-RPC clients (not the wss:// WebSocket URL)
-    const publicClient = createPublicClient({ chain: base, transport: http(getHttpRpcUrl()) });
-    const walletClient = createWalletClient({ account, chain: base, transport: http(getHttpRpcUrl()) });
+    const httpUrl = getHttpRpcUrl();
+    const publicClient = createPublicClient({ chain: base, transport: http(httpUrl) });
+    const walletClient = createWalletClient({ account, chain: base, transport: http(httpUrl) });
 
-    const value = parseEther(buyAmountEth);
+    const buyAmountWei = parseEther(buyAmountEth);
 
-    // Simulate the buy to get the expected token output, then apply
-    // slippagePercent as a minimum order size so the tx reverts on-chain if the
-    // price has moved too far by the time our tx lands.
-    let minOrderSize = 0n;
+    // ── Step 1: Get quote from Zora API ───────────────────────────────────────
+    const call = await fetchZoraQuote({
+      tokenAddress,
+      buyAmountWei,
+      slippage,
+      sender: account.address,
+    });
+
+    const value = BigInt(call.value);
+
+    // ── Step 2: Simulate — revert early before spending gas ───────────────────
     try {
-      const { result: expectedTokens } = await publicClient.simulateContract({
-        address: tokenAddress,
-        abi: ZORA_COIN_ABI,
-        functionName: "buy",
-        args: [account.address, account.address, ZERO_ADDRESS, "zora-sniper", expectedMarketType, 0n, 0n],
+      await publicClient.call({
+        to: call.target as Address,
+        data: call.data as `0x${string}`,
         value,
-        account,
+        account: account.address,
       });
-      // Convert slippagePercent (e.g. 5.0) to basis points (500), then compute floor.
-      const slippageBps = BigInt(Math.round(slippagePercent * 100));
-      minOrderSize = (expectedTokens * (10_000n - slippageBps)) / 10_000n;
-      logger.info(
-        { expectedTokens: expectedTokens.toString(), minOrderSize: minOrderSize.toString(), slippagePercent },
-        "Slippage applied to buy"
-      );
+      logger.info({ tokenAddress }, "Simulation passed");
     } catch (simErr) {
-      logger.warn(
-        { simErr, tokenAddress, expectedMarketType },
-        "Buy simulation failed — proceeding with minOrderSize=0 (no slippage protection)"
-      );
-      minOrderSize = 0n;
+      const msg = simErr instanceof Error ? simErr.message.slice(0, 200) : String(simErr);
+      throw new Error(`Simulation reverted — aborting buy: ${msg}`);
     }
 
-    // EIP-1559 gas: cap maxFeePerGas at the user-configured limit.
-    // Use estimateFeesPerGas() so we also get maxPriorityFeePerGas correctly.
+    // ── Step 3: EIP-1559 gas — cap at user-configured maxGasGwei ─────────────
     const maxFeeCapWei = BigInt(Math.round(maxGasGwei * 1e9));
     const feeEstimate = await publicClient.estimateFeesPerGas();
     const maxFeePerGas =
-      feeEstimate.maxFeePerGas < maxFeeCapWei
-        ? feeEstimate.maxFeePerGas
-        : maxFeeCapWei;
-    // Priority fee: use the network estimate but don't exceed the overall cap.
+      feeEstimate.maxFeePerGas < maxFeeCapWei ? feeEstimate.maxFeePerGas : maxFeeCapWei;
     const maxPriorityFeePerGas =
       feeEstimate.maxPriorityFeePerGas < maxFeePerGas
         ? feeEstimate.maxPriorityFeePerGas
         : maxFeePerGas;
 
-    const txHash = await walletClient.writeContract({
-      address: tokenAddress,
-      abi: ZORA_COIN_ABI,
-      functionName: "buy",
-      args: [
-        account.address,
-        account.address,
-        ZERO_ADDRESS,
-        "zora-sniper",
-        expectedMarketType,
-        minOrderSize,
-        0n,
-      ],
+    // ── Step 4: Send transaction ───────────────────────────────────────────────
+    const txHash = await walletClient.sendTransaction({
+      to: call.target as Address,
+      data: call.data as `0x${string}`,
       value,
+      chain: base,
+      account,
       maxFeePerGas,
       maxPriorityFeePerGas,
     });
 
     logger.info({ txHash, tokenAddress }, "Buy tx submitted");
 
+    // ── Step 5: Wait for receipt ───────────────────────────────────────────────
     const receipt = await publicClient.waitForTransactionReceipt({
       hash: txHash,
       timeout: 60_000,
@@ -207,9 +233,7 @@ export async function executeBuy(params: TradeParams): Promise<void> {
       receipt.gasUsed * (receipt.effectiveGasPrice ?? maxFeePerGas)
     );
 
-    // Fix: measure actual tokens received via balanceOf diff (before vs after block).
-    // Re-simulating the buy on the mined block gives a fresh simulation result, NOT
-    // the actual tokens this tx received — the pool state has already changed by then.
+    // ── Step 6: Measure tokens received via balanceOf diff ────────────────────
     let tokenAmount = "";
     try {
       const [balBefore, balAfter] = await Promise.all([
@@ -234,11 +258,10 @@ export async function executeBuy(params: TradeParams): Promise<void> {
         logger.info({ received: received.toString(), tokenAddress }, "Token amount measured via balanceOf diff");
       }
     } catch {
-      // Non-fatal — token amount will be left blank
       logger.warn({ tokenAddress }, "balanceOf diff failed — token amount left blank");
     }
 
-    // Calculate entry price: ETH spent ÷ tokens received.
+    // Calculate entry price: ETH spent ÷ tokens received
     const tokensNum = tokenAmount ? parseFloat(formatUnits(BigInt(tokenAmount), 18)) : 0;
     const ethNum = parseFloat(buyAmountEth);
     const entryPriceEth = tokensNum > 0 ? (ethNum / tokensNum).toFixed(18) : null;
@@ -257,7 +280,6 @@ export async function executeBuy(params: TradeParams): Promise<void> {
       .where(eq(tradesTable.id, tradeRow.id))
       .returning();
 
-    // Update per-creator snipe counter on success
     if (success) {
       await db
         .update(creatorsTable)
@@ -271,7 +293,6 @@ export async function executeBuy(params: TradeParams): Promise<void> {
         lastEventAt: new Date().toISOString(),
       });
     } else {
-      // Failed on-chain — update lastEventAt but don't increment snipedToday.
       botState.update({ lastEventAt: new Date().toISOString() });
     }
 
@@ -286,7 +307,6 @@ export async function executeBuy(params: TradeParams): Promise<void> {
       .where(eq(tradesTable.id, tradeRow.id))
       .returning();
 
-    // Exception (pre-submission failure) — don't increment snipedToday.
     botState.update({ lastEventAt: new Date().toISOString() });
     broadcast("trade", updated);
   }
@@ -295,7 +315,6 @@ export async function executeBuy(params: TradeParams): Promise<void> {
 export async function getWalletBalance(): Promise<{ address: string; balanceEth: string } | null> {
   try {
     const account = privateKeyToAccount(getWalletKey());
-    // Bug #3 fix: use HTTP URL here too
     const publicClient = createPublicClient({ chain: base, transport: http(getHttpRpcUrl()) });
     const balanceWei = await publicClient.getBalance({ address: account.address });
     return {
