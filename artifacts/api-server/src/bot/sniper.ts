@@ -1,7 +1,7 @@
 import { createPublicClient, webSocket, type Address } from "viem";
 import { base } from "viem/chains";
 import { db, creatorsTable, tradesTable } from "@workspace/db";
-import { eq, and, gte, ne, sql } from "drizzle-orm";
+import { eq, and, gte, ne, sql, inArray } from "drizzle-orm";
 import { logger } from "../lib/logger";
 import { botState } from "./state";
 import { broadcast } from "./ws";
@@ -223,11 +223,12 @@ async function handleCoinCreated(params: {
   if (config.watchMode === "all") {
     shouldSnipe = true;
   } else {
-    // Whitelist mode — look up creator for eligibility and per-wallet settings
+    // Fix: use case-insensitive lookup so checksum-formatted addresses in the
+    // DB still match the lowercased creatorAddr we derive from on-chain events.
     const [found] = await db
       .select()
       .from(creatorsTable)
-      .where(eq(creatorsTable.address, creatorAddr))
+      .where(sql`lower(${creatorsTable.address}) = ${creatorAddr}`)
       .limit(1);
     creatorRow = found ?? null;
     shouldSnipe = !!creatorRow?.enabled;
@@ -289,6 +290,35 @@ async function handleCoinCreated(params: {
     { creatorAddr, coin, effectiveBuyAmount },
     "Creator matched — executing snipe"
   );
+
+  // Fix: dedup guard — prevent double-buy if the same coin event is replayed
+  // after a WebSocket reconnect. Check for any existing pending/confirmed trade
+  // for this exact token address before firing the buy.
+  const [dupTrade] = await db
+    .select({ id: tradesTable.id })
+    .from(tradesTable)
+    .where(
+      and(
+        eq(tradesTable.tokenAddress, coin.toLowerCase()),
+        inArray(tradesTable.status, ["pending", "confirmed"])
+      )
+    )
+    .limit(1);
+
+  if (dupTrade) {
+    logger.warn(
+      { coin, dupId: dupTrade.id },
+      "Coin already pending/confirmed — skipping duplicate snipe"
+    );
+    await recordSkipped(
+      coin,
+      name,
+      symbol,
+      creatorAddr,
+      `Duplicate: trade #${dupTrade.id} already pending/confirmed`
+    );
+    return;
+  }
 
   // Fire-and-forget: don't await so we keep listening
   executeBuy({
