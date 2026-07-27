@@ -8,6 +8,7 @@ import {
   formatUnits,
   maxUint256,
   type Address,
+  type Account,
 } from "viem";
 import { base } from "viem/chains";
 import { privateKeyToAccount } from "viem/accounts";
@@ -127,11 +128,14 @@ async function getLiFiQuote(
 /**
  * Ensure the Li.Fi router has enough ERC20 allowance, approving if needed.
  * No-op for native ETH swaps (fromToken = ETH_ADDRESS).
+ *
+ * IMPORTANT: `account` must be the full Account object (from privateKeyToAccount),
+ * NOT just account.address — viem's writeContract needs the signing key.
  */
 async function ensureApproval(
   publicClient: ReturnType<typeof makePublicClient>,
   walletClient: ReturnType<typeof createWalletClient>,
-  account: Address,
+  account: Account,
   tokenAddress: Address,
   spender: Address,
   amount: bigint,
@@ -142,7 +146,7 @@ async function ensureApproval(
     address: tokenAddress,
     abi: ERC20_ABI,
     functionName: "allowance",
-    args: [account, spender],
+    args: [account.address as Address, spender],
   });
 
   if (existing >= amount) {
@@ -346,18 +350,18 @@ async function monitorTpSl(
     if (!shouldTp && !shouldSl) continue;
 
     const reason = shouldTp ? "take_profit" : "stop_loss";
-    logger.info({ tradeId, reason, currentPrice, tpPrice, slPrice }, "TP/SL triggered, executing sell via Li.Fi");
+    logger.info({ tradeId, reason, currentPrice, tpPrice, slPrice }, "TP/SL triggered, executing sell");
 
     try {
-      const account = privateKeyToAccount(getWalletKey());
-      const walletClient = createWalletClient({ account, chain: base, transport: http(getHttpRpcUrl()) });
+      // Read current balance
+      let probeAcct: ReturnType<typeof privateKeyToAccount>;
+      try { probeAcct = privateKeyToAccount(getWalletKey()); } catch { break; }
 
-      // Get current token balance
       const rawBal = await publicClient.readContract({
         address: tokenAddress,
         abi: ERC20_ABI,
         functionName: "balanceOf",
-        args: [account.address],
+        args: [probeAcct.address],
       });
 
       if (rawBal === 0n) {
@@ -365,56 +369,10 @@ async function monitorTpSl(
         break;
       }
 
-      // Get Li.Fi quote for token → ETH sell
-      const sellQuote = await getLiFiQuote(
-        tokenAddress,
-        ETH_ADDRESS,
-        rawBal,
-        account.address,
-        10, // 10% slippage for sell
-      );
-
-      // Approve Li.Fi spender if needed
-      if (sellQuote.estimate.approvalAddress) {
-        await ensureApproval(
-          publicClient,
-          walletClient,
-          account.address,
-          tokenAddress,
-          sellQuote.estimate.approvalAddress as Address,
-          rawBal,
-        );
-      }
-
-      const { transactionRequest: sellTx } = sellQuote;
-      const hash = await walletClient.sendTransaction({
-        to: sellTx.to as Address,
-        data: sellTx.data as `0x${string}`,
-        value: BigInt(sellTx.value || "0"),
-        gas: sellTx.gasLimit ? BigInt(sellTx.gasLimit) : undefined,
-        account,
-        chain: base,
-      });
-
-      const receipt = await publicClient.waitForTransactionReceipt({ hash });
-      if (receipt.status === "success") {
-        const ethRecovered = sellQuote.estimate.toAmountMin
-          ? formatEther(BigInt(sellQuote.estimate.toAmountMin))
-          : (parseFloat(formatUnits(rawBal, 18)) * currentPrice).toFixed(6);
-
-        const buyEthNum = parseFloat(buyAmountEth);
-        const pnl = (parseFloat(ethRecovered) - buyEthNum).toFixed(6);
-
-        await db
-          .update(tradesTable)
-          .set({ status: "sold", sellTxHash: hash, sellAmountEth: ethRecovered, pnlEth: pnl })
-          .where(eq(tradesTable.id, tradeId));
-
-        logger.info({ tradeId, reason, pnl, ethRecovered, hash }, "TP/SL sell confirmed via Li.Fi");
-        break;
-      } else {
-        throw new Error("Li.Fi sell tx reverted on-chain");
-      }
+      // Sell via Li.Fi
+      await runLiFiSell(tradeId, tokenAddress, rawBal, buyAmountEth, 10);
+      logger.info({ tradeId, reason }, "TP/SL sell confirmed via Li.Fi");
+      break;
     } catch (err) {
       sellAttempts++;
       logger.error({ err, tradeId, sellAttempts, maxAttempts: MAX_SELL_ATTEMPTS }, "TP/SL sell failed");
@@ -428,11 +386,76 @@ async function monitorTpSl(
   }
 }
 
-// ── Market sell helper ────────────────────────────────────────────────────
+// ── Market sell helpers ───────────────────────────────────────────────────
+
+/**
+ * Sell tokens via Li.Fi (token → ETH swap through the best available DEX route).
+ * Throws on any failure so the caller can handle the error.
+ */
+async function runLiFiSell(
+  tradeId: number,
+  tokenAddress: Address,
+  rawBal: bigint,
+  buyAmountEth: string,
+  slippagePercent: number = 10,
+): Promise<void> {
+  const publicClient = makePublicClient();
+  const account = privateKeyToAccount(getWalletKey());
+  const walletClient = createWalletClient({ account, chain: base, transport: http(getHttpRpcUrl()) });
+
+  const sellQuote = await getLiFiQuote(
+    tokenAddress,
+    ETH_ADDRESS,
+    rawBal,
+    account.address,
+    slippagePercent,
+  );
+
+  // NOTE: pass full `account` object (not account.address) so viem can sign the approval tx
+  if (sellQuote.estimate.approvalAddress) {
+    await ensureApproval(
+      publicClient,
+      walletClient,
+      account,
+      tokenAddress,
+      sellQuote.estimate.approvalAddress as Address,
+      rawBal,
+    );
+  }
+
+  const { transactionRequest: sellTx } = sellQuote;
+  const hash = await walletClient.sendTransaction({
+    to: sellTx.to as Address,
+    data: sellTx.data as `0x${string}`,
+    value: BigInt(sellTx.value || "0"),
+    gas: sellTx.gasLimit ? BigInt(sellTx.gasLimit) : undefined,
+    account,
+    chain: base,
+  });
+
+  logger.info({ tradeId, hash }, "Li.Fi sell tx submitted");
+  const receipt = await publicClient.waitForTransactionReceipt({ hash });
+
+  if (receipt.status !== "success") {
+    throw new Error("Li.Fi sell tx reverted on-chain");
+  }
+
+  const ethRecovered = sellQuote.estimate.toAmountMin
+    ? formatEther(BigInt(sellQuote.estimate.toAmountMin))
+    : "0";
+  const pnl = (parseFloat(ethRecovered) - parseFloat(buyAmountEth)).toFixed(6);
+
+  await db
+    .update(tradesTable)
+    .set({ status: "sold", sellTxHash: hash, sellAmountEth: ethRecovered, pnlEth: pnl })
+    .where(eq(tradesTable.id, tradeId));
+
+  logger.info({ tradeId, pnl, ethRecovered, hash }, "Market sell confirmed via Li.Fi");
+}
 
 /**
  * Executes an immediate market sell of all tokens for a position via Li.Fi.
- * Updates the trade record to "sold" on success.
+ * Updates the trade record to "sold" on success, "confirmed" (with failReason) on failure.
  */
 async function runMarketSell(
   tradeId: number,
@@ -440,59 +463,11 @@ async function runMarketSell(
   rawBal: bigint,
   buyAmountEth: string,
 ): Promise<void> {
-  const publicClient = makePublicClient();
-  const account = privateKeyToAccount(getWalletKey());
-  const walletClient = createWalletClient({ account, chain: base, transport: http(getHttpRpcUrl()) });
-
   try {
-    const sellQuote = await getLiFiQuote(
-      tokenAddress,
-      ETH_ADDRESS,
-      rawBal,
-      account.address,
-      10, // 10% slippage for market sell
-    );
-
-    if (sellQuote.estimate.approvalAddress) {
-      await ensureApproval(
-        publicClient,
-        walletClient,
-        account.address,
-        tokenAddress,
-        sellQuote.estimate.approvalAddress as Address,
-        rawBal,
-      );
-    }
-
-    const { transactionRequest: sellTx } = sellQuote;
-    const hash = await walletClient.sendTransaction({
-      to: sellTx.to as Address,
-      data: sellTx.data as `0x${string}`,
-      value: BigInt(sellTx.value || "0"),
-      gas: sellTx.gasLimit ? BigInt(sellTx.gasLimit) : undefined,
-      account,
-      chain: base,
-    });
-
-    const receipt = await publicClient.waitForTransactionReceipt({ hash });
-    if (receipt.status === "success") {
-      const ethRecovered = sellQuote.estimate.toAmountMin
-        ? formatEther(BigInt(sellQuote.estimate.toAmountMin))
-        : "0";
-      const pnl = (parseFloat(ethRecovered) - parseFloat(buyAmountEth)).toFixed(6);
-
-      await db
-        .update(tradesTable)
-        .set({ status: "sold", sellTxHash: hash, sellAmountEth: ethRecovered, pnlEth: pnl })
-        .where(eq(tradesTable.id, tradeId));
-
-      logger.info({ tradeId, pnl, ethRecovered, hash }, "Market sell confirmed via Li.Fi");
-    } else {
-      throw new Error("Market sell tx reverted on-chain");
-    }
+    await runLiFiSell(tradeId, tokenAddress, rawBal, buyAmountEth);
   } catch (err) {
     const failReason = (err instanceof Error ? err.message : String(err)).slice(0, 500);
-    logger.error({ err, tradeId, failReason }, "Market sell failed");
+    logger.error({ err, tradeId, failReason }, "Market sell via Li.Fi failed");
     await db
       .update(tradesTable)
       .set({ status: "confirmed", failReason })
