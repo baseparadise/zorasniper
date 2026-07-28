@@ -1117,6 +1117,22 @@ export async function executeBuy(params: TradeParams): Promise<void> {
 
     const buyAmountWei = parseEther(buyAmountEth);
 
+    // ── Step 0: Snapshot token balance before buy ─────────────────────────────
+    // Read current state (no blockNumber) — works on any node, no archive needed.
+    // Historical blockNumber-1n query (old approach) required archive access and
+    // often threw because the block wasn't propagated yet at query time.
+    let balBeforeBuy = 0n;
+    try {
+      balBeforeBuy = await publicClient.readContract({
+        address: tokenAddress,
+        abi: ERC20_ABI,
+        functionName: "balanceOf",
+        args: [account.address],
+      });
+    } catch {
+      // If pre-balance read fails (e.g. token not yet deployed), keep 0n
+    }
+
     // ── Step 1: Get quote from Zora API ──────��────────────────────────────────
     const call = await fetchZoraQuote({
       tokenAddress,
@@ -1191,31 +1207,26 @@ export async function executeBuy(params: TradeParams): Promise<void> {
     );
 
     // ── Step 6: Measure tokens received via balanceOf diff ────────────────────
+    // balBeforeBuy was snapshotted before the tx was sent (see Step 0).
+    // We read balAfter at the confirmed block — reliable on non-archive nodes.
     let tokenAmount = "";
     try {
-      const [balBefore, balAfter] = await Promise.all([
-        publicClient.readContract({
-          address: tokenAddress,
-          abi: ERC20_ABI,
-          functionName: "balanceOf",
-          args: [account.address],
-          blockNumber: receipt.blockNumber - 1n,
-        }),
-        publicClient.readContract({
-          address: tokenAddress,
-          abi: ERC20_ABI,
-          functionName: "balanceOf",
-          args: [account.address],
-          blockNumber: receipt.blockNumber,
-        }),
-      ]);
-      const received = balAfter - balBefore;
+      const balAfter = await publicClient.readContract({
+        address: tokenAddress,
+        abi: ERC20_ABI,
+        functionName: "balanceOf",
+        args: [account.address],
+        blockNumber: receipt.blockNumber,
+      });
+      const received = balAfter > balBeforeBuy ? balAfter - balBeforeBuy : 0n;
       if (received > 0n) {
         tokenAmount = formatUnits(received, 18);
         logger.info({ received: received.toString(), tokenAddress }, "Token amount measured via balanceOf diff");
+      } else {
+        logger.warn({ balBeforeBuy: balBeforeBuy.toString(), balAfter: balAfter.toString(), tokenAddress }, "balanceOf diff: no increase detected");
       }
-    } catch {
-      logger.warn({ tokenAddress }, "balanceOf diff failed — token amount left blank");
+    } catch (err) {
+      logger.warn({ tokenAddress, err: err instanceof Error ? err.message : String(err) }, "balanceOf diff failed — token amount left blank");
     }
 
     // Calculate entry price: ETH spent ÷ tokens received
