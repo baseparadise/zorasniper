@@ -454,8 +454,9 @@ async function fetchZoraPriceProbe(
 
     if (res.ok) {
       const data = await res.json();
-      // Try common field names across Zora API versions
+      // Zora API v2 returns amountOut inside the `quote` sub-object
       const amountOutStr: string | undefined =
+        data.quote?.amountOut ??
         data.amountOut ??
         data.result?.amountOut ??
         data.swapResult?.amountOut ??
@@ -473,19 +474,50 @@ async function fetchZoraPriceProbe(
     logger.warn({ err, tokenAddress }, "Zora price probe (buy-quote path) failed");
   }
 
-  // ── Strategy 2: /coin indexed price ──────────────────────────────────────
+  // ── Strategy 2: /coin indexed price → convert USDC price to ETH ──────────
   try {
     const coinRes = await fetch(
       `${ZORA_QUOTE_API}/coin?chainId=${base.id}&address=${tokenAddress.toLowerCase()}`,
     );
     if (coinRes.ok) {
       const coinData = await coinRes.json();
-      const priceEth: string | undefined =
-        coinData.priceEth ??
+      // Zora API v2: price lives at zora20Token.tokenPrice.priceInUsdc
+      const priceInUsdc: string | undefined =
+        coinData?.zora20Token?.tokenPrice?.priceInUsdc ??
+        coinData.priceEth ??           // legacy fallback
         coinData.currentPriceEth ??
-        coinData.price ??
-        coinData.coin?.priceEth;
-      if (priceEth) return parseFloat(priceEth);
+        coinData.price;
+
+      if (priceInUsdc) {
+        const tokenPriceUsdc = parseFloat(priceInUsdc);
+        if (tokenPriceUsdc > 0) {
+          // Derive ETH price: probe 1 ETH → USDC to get current ETH/USDC rate
+          const ethUsdcRes = await fetch(`${ZORA_QUOTE_API}/quote`, {
+            method: "POST",
+            headers,
+            body: JSON.stringify({
+              chainId: base.id,
+              tokenIn: { type: "eth" },
+              tokenOut: { type: "erc20", address: USDC_BASE.toLowerCase() },
+              amountIn: parseEther("1").toString(),
+              slippage: 0.5,
+              sender: sender.toLowerCase(),
+              recipient: sender.toLowerCase(),
+            }),
+          });
+          if (ethUsdcRes.ok) {
+            const ethUsdcData = await ethUsdcRes.json();
+            const usdcPerEthStr: string | undefined =
+              ethUsdcData.quote?.amountOut ?? ethUsdcData.amountOut;
+            if (usdcPerEthStr) {
+              const usdcPerEth = parseFloat(formatUnits(BigInt(usdcPerEthStr), USDC_DECIMALS));
+              if (usdcPerEth > 0) {
+                return tokenPriceUsdc / usdcPerEth; // ETH per token
+              }
+            }
+          }
+        }
+      }
     }
   } catch (err) {
     logger.warn({ err, tokenAddress }, "Zora price probe (coin endpoint) failed");
