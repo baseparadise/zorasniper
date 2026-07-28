@@ -165,7 +165,7 @@ function injectPermitSignature(callDataHex: string, signature: `0x${string}`): s
   const zeroPad = "0".repeat(62); // 31 bytes padding → 62 chars
   const encodedSig = lengthPrefix + sigHex + zeroPad; // 256 chars total
   // Replace the full 256-char slot starting at the placeholder position
-  return callDataHex.slice(0, idx) + encodedSig + callDataHex.slice(idx + 256);
+  return callDataHex.slice(0, idx) + encodedSig + callDataHex.slice(idx + PLACEHOLDER.length);
 }
 
 /**
