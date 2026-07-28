@@ -214,9 +214,83 @@ async function fetchZoraQuote(params: {
   throw new Error("Zora quote failed after 3 attempts — pool not ready or token invalid");
 }
 
+/** WETH address on Base — used to identify ETH-paired pools. */
+const WETH_BASE = "0x4200000000000000000000000000000000000006";
+
+/**
+ * Generic Zora Quote API caller.
+ * tokenIn / tokenOut each follow the Zora API shape:
+ *   { type: "eth" } or { type: "erc20", address: "0x..." }
+ */
+async function fetchZoraQuoteGeneric(params: {
+  tokenIn: { type: "eth" } | { type: "erc20"; address: string };
+  tokenOut: { type: "eth" } | { type: "erc20"; address: string };
+  amountIn: bigint;
+  slippage: number; // fractional, e.g. 0.05
+  sender: string;
+  label?: string; // log label
+}): Promise<ZoraCall> {
+  const { tokenIn, tokenOut, amountIn, slippage, sender, label = "Zora quote" } = params;
+  const headers: Record<string, string> = { "Content-Type": "application/json" };
+  const _apiKey = nextZoraKey();
+  if (_apiKey) headers["x-api-key"] = _apiKey;
+
+  const body = JSON.stringify({
+    chainId: base.id,
+    tokenIn,
+    tokenOut,
+    amountIn: amountIn.toString(),
+    slippage,
+    sender: sender.toLowerCase(),
+    recipient: sender.toLowerCase(),
+  });
+
+  for (let attempt = 1; attempt <= 3; attempt++) {
+    const res = await fetch(`${ZORA_QUOTE_API}/quote`, { method: "POST", headers, body });
+
+    if (!res.ok) {
+      const text = await res.text().catch(() => "");
+      // Detect "SwapError: Failed to get quote" — no point retrying, surface immediately
+      const isNoRoute =
+        text.includes("SwapError") ||
+        text.includes("Failed to get quote") ||
+        (res.status === 400 && text.includes("UNKNOWN"));
+      if (isNoRoute) {
+        throw new Error(`ZoraNoRoute: ${text.slice(0, 200)}`);
+      }
+      if (attempt < 3) {
+        logger.warn({ attempt, status: res.status, body: text.slice(0, 100) }, `${label} attempt ${attempt}/3 failed, retry in 5s`);
+        await new Promise((r) => setTimeout(r, 5_000));
+        continue;
+      }
+      throw new Error(`${label} HTTP ${res.status}: ${text.slice(0, 200)}`);
+    }
+
+    const data = await res.json();
+    if (!data.call) {
+      if (data.success === "false" || data.error) {
+        // API returned 200 but with an error payload — treat as no-route
+        throw new Error(`ZoraNoRoute: ${JSON.stringify(data).slice(0, 200)}`);
+      }
+      if (attempt < 3) {
+        logger.warn({ attempt, data }, `${label} attempt ${attempt}/3 — no call, retry in 5s`);
+        await new Promise((r) => setTimeout(r, 5_000));
+        continue;
+      }
+      throw new Error(`${label} returned no call: ${JSON.stringify(data).slice(0, 200)}`);
+    }
+
+    logger.info({ attempt, target: data.call.target }, `${label} OK`);
+    return data.call as ZoraCall;
+  }
+
+  throw new Error(`${label} failed after 3 attempts`);
+}
+
 /**
  * Fetch a SELL quote from Zora Quote API (erc20 → ETH).
- * Used exclusively by the sniper TP/SL monitor.
+ * Throws ZoraNoRoute error (message starts with "ZoraNoRoute:") if the Zora API
+ * cannot find a direct route — the caller can then attempt a two-step sell.
  */
 async function fetchZoraSellQuote(params: {
   tokenAddress: string;
@@ -224,55 +298,149 @@ async function fetchZoraSellQuote(params: {
   slippage: number; // fractional
   sender: string;
 }): Promise<ZoraCall> {
-  const headers: Record<string, string> = { "Content-Type": "application/json" };
-  const _apiKey = nextZoraKey();
-  if (_apiKey) headers["x-api-key"] = _apiKey;
-
-  const body = JSON.stringify({
-    chainId: base.id,
+  return fetchZoraQuoteGeneric({
     tokenIn: { type: "erc20", address: params.tokenAddress.toLowerCase() },
     tokenOut: { type: "eth" },
-    amountIn: params.tokenAmountWei.toString(),
+    amountIn: params.tokenAmountWei,
     slippage: params.slippage,
-    sender: params.sender.toLowerCase(),
-    recipient: params.sender.toLowerCase(),
+    sender: params.sender,
+    label: "Zora sell quote",
   });
+}
 
-  for (let attempt = 1; attempt <= 3; attempt++) {
-    const res = await fetch(`${ZORA_QUOTE_API}/quote`, {
-      method: "POST",
-      headers,
-      body,
-    });
+/**
+ * Fetch the pool currency for a Zora coin via the /coin endpoint.
+ * Content coins pair against a creator coin; creator coins pair against the ZORA token.
+ * Returns null if the endpoint fails or the coin is not found.
+ */
+async function fetchZoraPoolCurrency(tokenAddress: string): Promise<string | null> {
+  try {
+    const headers: Record<string, string> = {};
+    const _apiKey = nextZoraKey();
+    if (_apiKey) headers["x-api-key"] = _apiKey;
 
-    if (!res.ok) {
-      const text = await res.text().catch(() => "");
-      if (attempt < 3) {
-        logger.warn(
-          { attempt, status: res.status, body: text.slice(0, 100) },
-          `Zora sell quote attempt ${attempt}/3 failed, retry in 5s`,
-        );
-        await new Promise((r) => setTimeout(r, 5000));
-        continue;
-      }
-      throw new Error(`Zora sell quote HTTP ${res.status}: ${text.slice(0, 200)}`);
-    }
+    const res = await fetch(
+      `${ZORA_QUOTE_API}/coin?chainId=${base.id}&address=${tokenAddress.toLowerCase()}`,
+      { headers },
+    );
+    if (!res.ok) return null;
 
     const data = await res.json();
-    if (!data.call) {
-      if (attempt < 3) {
-        logger.warn({ attempt, data }, `Zora sell quote attempt ${attempt}/3 — no call, retry in 5s`);
-        await new Promise((r) => setTimeout(r, 5000));
-        continue;
-      }
-      throw new Error(`Zora sell quote returned no call: ${JSON.stringify(data).slice(0, 200)}`);
-    }
+    const addr: string | undefined = data?.zora20Token?.poolCurrencyToken?.address;
+    if (!addr) return null;
 
-    logger.info({ attempt, target: data.call.target }, "Zora sell quote OK");
-    return data.call as ZoraCall;
+    logger.info({ tokenAddress, poolCurrency: addr }, "Zora pool currency detected");
+    return addr.toLowerCase();
+  } catch (err) {
+    logger.warn({ err, tokenAddress }, "fetchZoraPoolCurrency failed");
+    return null;
+  }
+}
+
+/**
+ * Execute a single Zora swap transaction: approve spender → simulate (warn-only)
+ * → estimate gas → send tx → wait for receipt.
+ * Returns the tx hash on success, throws on failure.
+ */
+async function executeZoraSwapTx(params: {
+  call: ZoraCall;
+  tokenInAddress: Address | null; // null for native ETH swaps (no approval needed)
+  tokenInAmount: bigint;
+  maxGasGwei: number;
+  publicClient: ReturnType<typeof createPublicClient>;
+  walletClient: ReturnType<typeof createWalletClient>;
+  account: ReturnType<typeof privateKeyToAccount>;
+  logCtx: Record<string, unknown>;
+}): Promise<`0x${string}`> {
+  const { call, tokenInAddress, tokenInAmount, maxGasGwei, publicClient, walletClient, account, logCtx } = params;
+  const routerAddress = toHex(call.target) as Address;
+
+  // Approve if selling an ERC20
+  if (tokenInAddress) {
+    const allowance = await publicClient.readContract({
+      address: tokenInAddress,
+      abi: ERC20_ABI,
+      functionName: "allowance",
+      args: [account.address, routerAddress],
+    });
+    if (allowance < tokenInAmount) {
+      logger.info({ ...logCtx, spender: call.target }, "Approving Zora router");
+      const approveTx = await walletClient.writeContract({
+        address: tokenInAddress,
+        abi: ERC20_ABI,
+        functionName: "approve",
+        args: [routerAddress, maxUint256],
+        chain: base,
+        account,
+      });
+      await publicClient.waitForTransactionReceipt({ hash: approveTx, timeout: 60_000 });
+      logger.info({ ...logCtx, approveTx }, "Approval confirmed");
+    }
   }
 
-  throw new Error("Zora sell quote failed after 3 attempts");
+  // Simulate (warning-only — Zora router often reverts in eth_call)
+  try {
+    await publicClient.call({
+      to: routerAddress,
+      data: toHex(call.data),
+      value: toBigIntSafe(call.value),
+      account: account.address,
+    });
+    logger.info(logCtx, "Swap simulation passed");
+  } catch (simErr) {
+    const msg = simErr instanceof Error ? simErr.message.slice(0, 200) : String(simErr);
+    logger.warn({ ...logCtx, msg }, "Swap simulation warning — proceeding");
+  }
+
+  // Gas estimation with fallback
+  const maxFeeCapWei = BigInt(Math.round(maxGasGwei * 1e9));
+  let feeEstimate: { maxFeePerGas: bigint; maxPriorityFeePerGas: bigint };
+  let estimatedGas: bigint;
+  try {
+    const [fees, gas] = await Promise.all([
+      publicClient.estimateFeesPerGas(),
+      publicClient.estimateGas({
+        to: routerAddress,
+        data: toHex(call.data),
+        value: toBigIntSafe(call.value),
+        account: account.address,
+      }),
+    ]);
+    feeEstimate = fees;
+    estimatedGas = gas;
+  } catch (gasErr) {
+    logger.warn({ ...logCtx, err: gasErr }, "Gas estimation failed — using 500k fallback");
+    feeEstimate = await publicClient.estimateFeesPerGas();
+    estimatedGas = 500_000n;
+  }
+  const maxFeePerGas =
+    feeEstimate.maxFeePerGas < maxFeeCapWei ? feeEstimate.maxFeePerGas : maxFeeCapWei;
+  const maxPriorityFeePerGas =
+    feeEstimate.maxPriorityFeePerGas < maxFeePerGas
+      ? feeEstimate.maxPriorityFeePerGas
+      : maxFeePerGas;
+  const gasLimit = (estimatedGas * 120n) / 100n;
+
+  const txHash = await walletClient.sendTransaction({
+    to: routerAddress,
+    data: toHex(call.data),
+    value: toBigIntSafe(call.value),
+    chain: base,
+    account,
+    gas: gasLimit,
+    maxFeePerGas,
+    maxPriorityFeePerGas,
+  });
+
+  logger.info({ ...logCtx, txHash }, "Swap tx submitted");
+  const receipt = await publicClient.waitForTransactionReceipt({ hash: txHash, timeout: 60_000 });
+
+  if (receipt.status !== "success") {
+    throw new Error(`Swap tx reverted on-chain: ${txHash}`);
+  }
+
+  logger.info({ ...logCtx, txHash }, "Swap tx confirmed");
+  return txHash;
 }
 
 /**
@@ -355,6 +523,18 @@ async function fetchZoraPriceProbe(
 /**
  * Approve the Zora router + execute a sell transaction via Zora Quote API.
  * Records sell result in the trades table and broadcasts the update.
+ *
+ * Two-step sell fallback for creator-coin-paired tokens:
+ *   Some Zora content coins (coinType: CONTENT) pool against a creator coin
+ *   rather than ETH/WETH directly. The Zora /quote endpoint returns
+ *   "SwapError: Failed to get quote" when asked to sell such a token straight
+ *   to ETH, because there is no single-hop ETH pool.
+ *
+ *   On that error we:
+ *     1. Fetch the pool currency from /coin (e.g. batnater creator coin).
+ *     2. Sell: token → poolCurrency  (hop 1, direct pool — always works).
+ *     3. Sell: poolCurrency → ETH    (hop 2, creator coin has an ETH pool).
+ *   ETH balance delta across both hops is used for PnL calculation.
  */
 export async function executeZoraSell(params: {
   tradeId: number;
@@ -365,119 +545,134 @@ export async function executeZoraSell(params: {
   reason: string;
 }): Promise<void> {
   const { tradeId, tokenAddress, tokenBalance, slippagePercent, maxGasGwei, reason } = params;
+  const slippage = slippagePercent / 100;
   const account = privateKeyToAccount(getWalletKey());
   const httpUrl = getHttpRpcUrl();
   const publicClient = createPublicClient({ chain: base, transport: http(httpUrl) });
   const walletClient = createWalletClient({ account, chain: base, transport: http(httpUrl) });
 
-  // ── Step 1: Get sell quote ────────────────────────────────────────────────
-  const call = await fetchZoraSellQuote({
-    tokenAddress,
-    tokenAmountWei: tokenBalance,
-    slippage: slippagePercent / 100,
-    sender: account.address,
-  });
+  const swapCtx = { tradeId, reason };
 
-  // ── Step 2: Approve Zora router if allowance is insufficient ──────────────
-  const allowance = await publicClient.readContract({
-    address: tokenAddress,
-    abi: ERC20_ABI,
-    functionName: "allowance",
-    args: [account.address, toHex(call.target) as Address],
-  });
-
-  if (allowance < tokenBalance) {
-    logger.info({ tradeId, spender: call.target }, "Approving Zora router for token sell");
-    const approveTx = await walletClient.writeContract({
-      address: tokenAddress,
-      abi: ERC20_ABI,
-      functionName: "approve",
-      args: [toHex(call.target) as Address, maxUint256],
-      chain: base,
-      account,
-    });
-    await publicClient.waitForTransactionReceipt({ hash: approveTx, timeout: 60_000 });
-    logger.info({ tradeId, approveTx }, "Sell approval confirmed");
-  }
-
-  // ── Step 3: Simulate sell (warning-only — Zora router often reverts via eth_call) ──
-  try {
-    await publicClient.call({
-      to: toHex(call.target) as Address,
-      data: toHex(call.data),
-      value: toBigIntSafe(call.value),
-      account: account.address,
-    });
-    logger.info({ tradeId }, "Sell simulation passed");
-  } catch (simErr) {
-    // Zora router contracts frequently revert in eth_call but succeed on-chain.
-    // Log the warning and proceed — the actual send will confirm or revert.
-    const msg = simErr instanceof Error ? simErr.message.slice(0, 200) : String(simErr);
-    logger.warn({ tradeId, msg }, "Sell simulation warning — proceeding with send anyway");
-  }
-
-  // ── Step 4: Gas estimation (with fallback) ───────────────────────────────
-  const maxFeeCapWei = BigInt(Math.round(maxGasGwei * 1e9));
-  let feeEstimate: { maxFeePerGas: bigint; maxPriorityFeePerGas: bigint };
-  let estimatedGas: bigint;
-  try {
-    const [fees, gas] = await Promise.all([
-      publicClient.estimateFeesPerGas(),
-      publicClient.estimateGas({
-        to: toHex(call.target) as Address,
-        data: toHex(call.data),
-        value: toBigIntSafe(call.value),
-        account: account.address,
-      }),
-    ]);
-    feeEstimate = fees;
-    estimatedGas = gas;
-    logger.info({ tradeId, estimatedGas: gas.toString() }, "Sell gas estimated");
-  } catch (gasErr) {
-    // estimateGas can fail when the contract reverts during estimation.
-    // Use conservative fallback: 500k gas (covers most Zora/Uniswap V4 sell paths).
-    logger.warn({ tradeId, err: gasErr }, "Sell gas estimation failed — using 500k fallback");
-    const fallbackFees = await publicClient.estimateFeesPerGas();
-    feeEstimate = fallbackFees;
-    estimatedGas = 500_000n;
-  }
-  const maxFeePerGas =
-    feeEstimate.maxFeePerGas < maxFeeCapWei ? feeEstimate.maxFeePerGas : maxFeeCapWei;
-  const maxPriorityFeePerGas =
-    feeEstimate.maxPriorityFeePerGas < maxFeePerGas
-      ? feeEstimate.maxPriorityFeePerGas
-      : maxFeePerGas;
-  const gasLimit = (estimatedGas * 120n) / 100n;
-
-  // ── Step 5: Capture ETH balance before send ───────────────────────────────
+  // ── Snapshot ETH balance before any sell ─────────────────────────────────
   const ethBefore = await publicClient.getBalance({ address: account.address });
 
-  // ── Step 6: Send sell tx ──────────────────────────────────────────────────
-  const txHash = await walletClient.sendTransaction({
-    to: toHex(call.target) as Address,
-    data: toHex(call.data),
-    value: toBigIntSafe(call.value),
-    chain: base,
-    account,
-    gas: gasLimit,
-    maxFeePerGas,
-    maxPriorityFeePerGas,
-  });
+  // ── Attempt 1: direct sell token → ETH ───────────────────────────────────
+  let directFailed = false;
+  let lastTxHash: `0x${string}` | null = null;
+  try {
+    const call = await fetchZoraSellQuote({
+      tokenAddress,
+      tokenAmountWei: tokenBalance,
+      slippage,
+      sender: account.address,
+    });
 
-  logger.info({ tradeId, txHash, reason }, "Sniper sell tx submitted via Zora API");
-
-  // ── Step 7: Wait for receipt ──────────────────────────────────────────────
-  const receipt = await publicClient.waitForTransactionReceipt({ hash: txHash, timeout: 60_000 });
-
-  if (receipt.status !== "success") {
-    throw new Error("Sniper sell tx reverted on-chain");
+    lastTxHash = await executeZoraSwapTx({
+      call,
+      tokenInAddress: tokenAddress,
+      tokenInAmount: tokenBalance,
+      maxGasGwei,
+      publicClient,
+      walletClient,
+      account,
+      logCtx: { ...swapCtx, step: "direct-sell" },
+    });
+  } catch (directErr) {
+    const msg = directErr instanceof Error ? directErr.message : String(directErr);
+    if (!msg.startsWith("ZoraNoRoute:")) {
+      // Genuine on-chain or network failure — surface immediately
+      throw directErr;
+    }
+    // No direct ETH route → try two-step sell
+    logger.warn(
+      { tradeId, tokenAddress, msg: msg.slice(0, 120) },
+      "Direct Zora sell has no route — checking pool currency for two-step sell",
+    );
+    directFailed = true;
   }
 
-  // ── Step 8: Calculate ETH received (net of gas) ───────────────────────────
+  // ── Attempt 2: two-step sell for creator-coin-paired tokens ──────────────
+  if (directFailed) {
+    const poolCurrency = await fetchZoraPoolCurrency(tokenAddress);
+
+    if (!poolCurrency || poolCurrency === WETH_BASE.toLowerCase()) {
+      throw new Error(
+        `Zora sell failed: no direct ETH route and no usable pool currency found for ${tokenAddress}`,
+      );
+    }
+
+    logger.info(
+      { tradeId, tokenAddress, poolCurrency },
+      "Two-step sell: token → poolCurrency → ETH",
+    );
+
+    // ── Hop 1: token → creator/pool currency ─────────────────────────────
+    const hop1Call = await fetchZoraQuoteGeneric({
+      tokenIn: { type: "erc20", address: tokenAddress.toLowerCase() },
+      tokenOut: { type: "erc20", address: poolCurrency },
+      amountIn: tokenBalance,
+      slippage,
+      sender: account.address,
+      label: "Zora two-step sell hop1 (token→poolCurrency)",
+    });
+
+    await executeZoraSwapTx({
+      call: hop1Call,
+      tokenInAddress: tokenAddress,
+      tokenInAmount: tokenBalance,
+      maxGasGwei,
+      publicClient,
+      walletClient,
+      account,
+      logCtx: { ...swapCtx, step: "two-step-hop1" },
+    });
+    // hop1 txHash captured for logging; final sellTxHash will be set to hop2
+
+    // ── Hop 2: creator/pool currency → ETH ───────────────────────────────
+    // Read the actual amount received from hop 1 (don't assume a fixed amount)
+    const poolCurrencyAddr = poolCurrency as Address;
+    const poolCurrencyBalance = await publicClient.readContract({
+      address: poolCurrencyAddr,
+      abi: ERC20_ABI,
+      functionName: "balanceOf",
+      args: [account.address],
+    });
+
+    if (poolCurrencyBalance === 0n) {
+      throw new Error(
+        `Two-step sell hop 1 succeeded but pool currency balance is 0 — cannot execute hop 2`,
+      );
+    }
+
+    logger.info(
+      { tradeId, poolCurrency, poolCurrencyBalance: poolCurrencyBalance.toString() },
+      "Two-step sell hop 1 confirmed — executing hop 2 (poolCurrency → ETH)",
+    );
+
+    const hop2Call = await fetchZoraSellQuote({
+      tokenAddress: poolCurrency,
+      tokenAmountWei: poolCurrencyBalance,
+      slippage,
+      sender: account.address,
+    });
+
+    lastTxHash = await executeZoraSwapTx({
+      call: hop2Call,
+      tokenInAddress: poolCurrencyAddr,
+      tokenInAmount: poolCurrencyBalance,
+      maxGasGwei,
+      publicClient,
+      walletClient,
+      account,
+      logCtx: { ...swapCtx, step: "two-step-hop2" },
+    });
+  }
+
+  // ── Calculate ETH received (net of gas across all hops) ───────────────────
   const ethAfter = await publicClient.getBalance({ address: account.address });
-  const gasSpent = receipt.gasUsed * (receipt.effectiveGasPrice ?? maxFeePerGas);
-  const ethReceivedGross = ethAfter - ethBefore + gasSpent;
-  const sellAmountEth = formatEther(ethReceivedGross > 0n ? ethReceivedGross : 0n);
+  // ethAfter - ethBefore already accounts for all gas spent across both hops
+  const ethReceivedNet = ethAfter > ethBefore ? ethAfter - ethBefore : 0n;
+  const sellAmountEth = formatEther(ethReceivedNet);
 
   // P&L vs original buy amount
   const [tradeRow] = await db.select().from(tradesTable).where(eq(tradesTable.id, tradeId));
@@ -486,12 +681,15 @@ export async function executeZoraSell(params: {
 
   const [updated] = await db
     .update(tradesTable)
-    .set({ status: "sold", sellTxHash: txHash, sellAmountEth, pnlEth })
+    .set({ status: "sold", sellTxHash: lastTxHash, sellAmountEth, pnlEth })
     .where(eq(tradesTable.id, tradeId))
     .returning();
 
   broadcast("trade", updated);
-  logger.info({ tradeId, txHash, sellAmountEth, pnlEth, reason }, "Sniper sell confirmed via Zora API");
+  logger.info(
+    { tradeId, sellAmountEth, pnlEth, reason, twoStep: directFailed },
+    "Sniper sell confirmed via Zora API",
+  );
 }
 
 // ── executeBuy ────────────────────────────────────────────────────────────
