@@ -305,6 +305,16 @@ const USDC_DECIMALS = 6;
  * Generic Zora Quote API caller.
  * tokenIn / tokenOut each follow the Zora API shape:
  *   { type: "eth" } or { type: "erc20", address: "0x..." }
+ *
+ * permitActiveSeconds: how long the Permit2 signature should stay valid.
+ * Defaults to 300 (5 min) — enough for approval + signing + submission.
+ * Passing 0 lets the API use its own default (often very short, which
+ * causes "execution reverted" during gas estimation if there's any delay).
+ *
+ * signatures: optional array of pre-signed Permit2 permits.  When provided
+ * the API embeds the signatures directly into the returned calldata, so
+ * injectPermitSignature() is NOT needed.  Pass after the initial quote
+ * round has been signed.
  */
 async function fetchZoraQuoteGeneric(params: {
   tokenIn: { type: "eth" } | { type: "erc20"; address: string };
@@ -313,8 +323,19 @@ async function fetchZoraQuoteGeneric(params: {
   slippage: number; // fractional, e.g. 0.05
   sender: string;
   label?: string; // log label
+  permitActiveSeconds?: number;
+  signatures?: Array<{ permit: ZoraPermit["permit"]; signature: string }>;
 }): Promise<ZoraQuoteResult> {
-  const { tokenIn, tokenOut, amountIn, slippage, sender, label = "Zora quote" } = params;
+  const {
+    tokenIn,
+    tokenOut,
+    amountIn,
+    slippage,
+    sender,
+    label = "Zora quote",
+    permitActiveSeconds = 300,
+    signatures,
+  } = params;
   const headers: Record<string, string> = { "Content-Type": "application/json" };
   const _apiKey = nextZoraKey();
   if (_apiKey) headers["x-api-key"] = _apiKey;
@@ -327,6 +348,8 @@ async function fetchZoraQuoteGeneric(params: {
     slippage,
     sender: sender.toLowerCase(),
     recipient: sender.toLowerCase(),
+    permitActiveSeconds,
+    ...(signatures && signatures.length > 0 ? { signatures } : {}),
   });
 
   for (let attempt = 1; attempt <= 3; attempt++) {
@@ -815,10 +838,15 @@ async function executeZoraSellViaApi(params: {
 
   // ── Handle Permit2 if the API returned permit data ────────────────────────
   //
-  // The Zora API builds sell calldata using Permit2 (Uniswap's universal permit
-  // router). When permits are returned, `call.data` contains the ASCII placeholder
-  // "REPLACE_WITH_PERMIT_SIGNATURE_1" where the 65-byte EIP-712 signature must
-  // be injected. Approval must go to the Permit2 contract, not the router.
+  // New flow (uses the official Zora API `signatures` field):
+  //   1. Sign each permit locally (EIP-712 via Permit2).
+  //   2. Re-call /quote with the signed permits in the `signatures` array.
+  //      The API embeds the signatures directly into the returned calldata —
+  //      no injectPermitSignature() byte manipulation needed.
+  //   3. Use the calldata from the re-quote as the final transaction payload.
+  //
+  // This eliminates the fragile placeholder-injection step and ensures the
+  // calldata the node simulates is identical to what we submit on-chain.
   let call = rawCall;
   let tokenInAddress: Address | null = tokenAddress; // null → skip approval inside executeZoraSwapTx
 
@@ -846,8 +874,8 @@ async function executeZoraSellViaApi(params: {
       logger.info({ tradeId, approveTx }, "Permit2 approval confirmed");
     }
 
-    // Sign each permit and inject signature into calldata
-    let callData = rawCall.data;
+    // Sign each permit
+    const signedPermits: Array<{ permit: ZoraPermit["permit"]; signature: string }> = [];
     for (const p of permits) {
       const sig = await walletClient.signTypedData({
         account,
@@ -881,11 +909,25 @@ async function executeZoraSellViaApi(params: {
           sigDeadline: BigInt(p.permit.sigDeadline),
         },
       });
-      callData = injectPermitSignature(callData, sig);
-      logger.info({ tradeId, sigLength: sig.length }, "Permit2 signature injected into calldata");
+      signedPermits.push({ permit: p.permit, signature: sig });
+      logger.info({ tradeId, sigLength: sig.length }, "Permit2 signature ready");
     }
 
-    call = { ...rawCall, data: callData };
+    // Re-quote with signed permits — API embeds signatures into calldata directly.
+    // This replaces the old injectPermitSignature() byte-manipulation approach.
+    logger.info({ tradeId, permitsCount: signedPermits.length }, "Re-quoting with signed permits");
+    const { call: signedCall } = await fetchZoraQuoteGeneric({
+      tokenIn: { type: "erc20", address: tokenAddress.toLowerCase() },
+      tokenOut: { type: "erc20", address: USDC_BASE.toLowerCase() },
+      amountIn: tokenBalance,
+      slippage,
+      sender: account.address,
+      label: "Zora sell re-quote (with signatures)",
+      permitActiveSeconds: 300,
+      signatures: signedPermits,
+    });
+
+    call = signedCall;
     // Permit2 handles token authorization — skip direct router approval
     tokenInAddress = null;
   }
