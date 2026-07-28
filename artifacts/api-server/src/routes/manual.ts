@@ -32,7 +32,7 @@ const LIFI_INTEGRATOR = "zorasniper001"; // Li.Fi integration ID
 const USDC_BASE = "0x833589fCD6eDb6E08f4c7C32D4f71b54bdA02913" as Address;
 const USDC_DECIMALS = 6;
 
-// ── ABI definitions ────────────────────────────────────────────────────────
+// ── ABI definitions ─────────��──────────────────────────────────────────────
 
 const ERC20_ABI = [
   { type: "function", name: "name", stateMutability: "view", inputs: [], outputs: [{ type: "string" }] },
@@ -89,6 +89,9 @@ function toBigIntSafe(s: string | null | undefined, fallback = 0n): bigint {
 
 const ZORA_QUOTE_API = "https://api-sdk.zora.engineering";
 
+// Permit2 universal contract address (same on all EVM chains)
+const PERMIT2_ADDRESS = "0x000000000022D473030F116dDEE9F6B43aC78BA3" as Address;
+
 // Supports multiple keys via ZORA_API_KEYS (comma-separated) or ZORA_API_KEY.
 const ZORA_API_KEYS: string[] = (() => {
   const multi = process.env.ZORA_API_KEYS;
@@ -114,11 +117,55 @@ interface ZoraCall {
   value: string;
 }
 
+interface ZoraPermit {
+  permit: {
+    details: {
+      token: string;
+      amount: string;
+      expiration: number;
+      nonce: number;
+    };
+    spender: string;
+    sigDeadline: string;
+  };
+  /** Placeholder string returned by Zora API — must be replaced with actual EIP-712 sig. */
+  signature: string;
+}
+
 interface ZoraQuoteResult {
   call: ZoraCall;
   /** Raw token amount out (string, 18 decimals) from the API response. May be
    *  undefined if the API does not include it in this version. */
   amountOut: string | null;
+}
+
+/**
+ * Injects a signed Permit2 signature into Zora API calldata.
+ *
+ * The Zora API returns sell calldata with a literal ASCII placeholder
+ * "REPLACE_WITH_PERMIT_SIGNATURE_1" where the 65-byte EIP-712 signature
+ * must be inserted. The bytes field is ABI-encoded as:
+ *   - 32 bytes = length prefix (0x41 = 65)
+ *   - 65 bytes = signature
+ *   - 31 bytes = zero-padding to next 32-byte boundary
+ * Total span in the hex string: 256 chars (128 bytes).
+ */
+function injectPermitSignature(callDataHex: string, signature: `0x${string}`): string {
+  const PLACEHOLDER = "REPLACE_WITH_PERMIT_SIGNATURE_1";
+  const idx = callDataHex.indexOf(PLACEHOLDER);
+  if (idx === -1) {
+    throw new Error("injectPermitSignature: placeholder not found in calldata — API response format may have changed");
+  }
+  const sigHex = signature.slice(2); // 130 hex chars (65 bytes)
+  if (sigHex.length !== 130) {
+    throw new Error(`injectPermitSignature: unexpected signature length ${sigHex.length} (expected 130 hex chars)`);
+  }
+  // ABI-encoded bytes for 65-byte sig: 32-byte length + 65-byte data + 31-byte pad = 128 bytes = 256 hex chars
+  const lengthPrefix = "0000000000000000000000000000000000000000000000000000000000000041"; // 64 chars
+  const zeroPad = "0".repeat(62); // 31 bytes padding → 62 chars
+  const encodedSig = lengthPrefix + sigHex + zeroPad; // 256 chars total
+  // Replace the full 256-char slot starting at the placeholder position
+  return callDataHex.slice(0, idx) + encodedSig + callDataHex.slice(idx + 256);
 }
 
 /**
@@ -940,6 +987,11 @@ async function runLiFiSell(
  * USDC routing is more reliable than ETH for Zora Coins whose pools pair
  * against a creator coin rather than WETH directly.
  * Uses the same EIP-1559 gas handling as the Zora buy path.
+ *
+ * The Zora API returns sell calldata with a Permit2 EIP-712 placeholder
+ * ("REPLACE_WITH_PERMIT_SIGNATURE_1") that must be signed and injected before
+ * the tx is submitted. This function handles that automatically.
+ *
  * Throws on any failure so the caller can fall back to Li.Fi.
  */
 async function runZoraSell(
@@ -968,12 +1020,12 @@ async function runZoraSell(
     args: [account.address],
   });
 
-  // ── Fetch Zora sell quote: token → USDC (same as sniper executeZoraSell) ──
+  // ── Fetch Zora sell quote: token → USDC (with retry, same as sniper) ─────
   const _apiKey = nextZoraKey();
   const headers: Record<string, string> = { "Content-Type": "application/json" };
   if (_apiKey) headers["x-api-key"] = _apiKey;
 
-  const body = JSON.stringify({
+  const quoteBody = JSON.stringify({
     chainId: base.id,
     tokenIn: { type: "erc20", address: tokenAddress.toLowerCase() },
     tokenOut: { type: "erc20", address: USDC_BASE.toLowerCase() },
@@ -983,40 +1035,133 @@ async function runZoraSell(
     recipient: account.address.toLowerCase(),
   });
 
-  const res = await fetch(`${ZORA_QUOTE_API}/quote`, { method: "POST", headers, body });
-  if (!res.ok) {
-    const text = await res.text().catch(() => "");
-    throw new Error(`Zora sell quote HTTP ${res.status}: ${text.slice(0, 200)}`);
-  }
-  const data = await res.json();
-  if (!data.call) {
-    throw new Error(`Zora sell quote returned no call: ${JSON.stringify(data).slice(0, 200)}`);
-  }
-  const call: ZoraCall = data.call;
-  const routerAddress = toHex(call.target) as Address;
+  let rawCall: ZoraCall | null = null;
+  let permits: ZoraPermit[] = [];
 
-  logger.info({ tradeId, target: call.target }, "Zora sell quote OK");
+  for (let attempt = 1; attempt <= 3; attempt++) {
+    const res = await fetch(`${ZORA_QUOTE_API}/quote`, { method: "POST", headers, body: quoteBody });
+    if (!res.ok) {
+      const text = await res.text().catch(() => "");
+      if (attempt < 3) {
+        logger.warn({ tradeId, attempt, status: res.status, body: text.slice(0, 100) }, "Zora sell quote failed, retry in 5s");
+        await new Promise(r => setTimeout(r, 5_000));
+        continue;
+      }
+      throw new Error(`Zora sell quote HTTP ${res.status}: ${text.slice(0, 200)}`);
+    }
+    const data = await res.json();
+    if (!data.call) {
+      if (attempt < 3) {
+        logger.warn({ tradeId, attempt, data }, "Zora sell quote: no call field, retry in 5s");
+        await new Promise(r => setTimeout(r, 5_000));
+        continue;
+      }
+      throw new Error(`Zora sell quote returned no call: ${JSON.stringify(data).slice(0, 200)}`);
+    }
+    rawCall = data.call as ZoraCall;
+    permits = Array.isArray(data.permits) ? data.permits : [];
+    break;
+  }
 
-  // ── Approve router to spend tokens if needed ─────────────────────────────
-  const allowance = await publicClient.readContract({
-    address: tokenAddress,
-    abi: ERC20_ABI,
-    functionName: "allowance",
-    args: [account.address, routerAddress],
-  });
-  if (allowance < rawBal) {
-    logger.info({ tradeId, spender: routerAddress }, "Approving Zora router for sell");
-    const approveTx = await walletClient.writeContract({
+  if (!rawCall) throw new Error("Zora sell quote failed after 3 attempts");
+
+  logger.info({ tradeId, target: rawCall.target, permitsCount: permits.length }, "Zora sell quote OK");
+
+  // ── Handle Permit2 if the API returned permit data ────────────────────────
+  //
+  // The Zora API builds sell calldata using Permit2. When permits are returned,
+  // `call.data` contains "REPLACE_WITH_PERMIT_SIGNATURE_1" which must be replaced
+  // with a signed EIP-712 Permit2 message. Approval goes to Permit2, not the router.
+  let call = rawCall;
+
+  if (permits.length > 0) {
+    logger.info({ tradeId, permitsCount: permits.length }, "Signing Permit2 for Zora sell");
+
+    // Approve Permit2 contract to spend tokens (if not already sufficient)
+    const permit2Allowance = await publicClient.readContract({
       address: tokenAddress,
       abi: ERC20_ABI,
-      functionName: "approve",
-      args: [routerAddress, maxUint256],
-      chain: base,
-      account,
+      functionName: "allowance",
+      args: [account.address, PERMIT2_ADDRESS],
     });
-    await publicClient.waitForTransactionReceipt({ hash: approveTx, timeout: 60_000 });
-    logger.info({ tradeId, approveTx }, "Zora sell approval confirmed");
+    if (permit2Allowance < rawBal) {
+      logger.info({ tradeId, spender: PERMIT2_ADDRESS }, "Approving Permit2 contract for sell");
+      const approveTx = await walletClient.writeContract({
+        address: tokenAddress,
+        abi: ERC20_ABI,
+        functionName: "approve",
+        args: [PERMIT2_ADDRESS, maxUint256],
+        chain: base,
+        account,
+      });
+      await publicClient.waitForTransactionReceipt({ hash: approveTx, timeout: 60_000 });
+      logger.info({ tradeId, approveTx }, "Permit2 approval confirmed");
+    }
+
+    // Sign each permit and inject signature into calldata
+    let callData = rawCall.data;
+    for (const p of permits) {
+      const sig = await walletClient.signTypedData({
+        account,
+        domain: {
+          name: "Permit2",
+          chainId: base.id,
+          verifyingContract: PERMIT2_ADDRESS,
+        },
+        types: {
+          PermitDetails: [
+            { name: "token", type: "address" },
+            { name: "amount", type: "uint160" },
+            { name: "expiration", type: "uint48" },
+            { name: "nonce", type: "uint48" },
+          ],
+          PermitSingle: [
+            { name: "details", type: "PermitDetails" },
+            { name: "spender", type: "address" },
+            { name: "sigDeadline", type: "uint256" },
+          ],
+        },
+        primaryType: "PermitSingle",
+        message: {
+          details: {
+            token: p.permit.details.token as Address,
+            amount: BigInt(p.permit.details.amount),
+            expiration: p.permit.details.expiration,
+            nonce: p.permit.details.nonce,
+          },
+          spender: p.permit.spender as Address,
+          sigDeadline: BigInt(p.permit.sigDeadline),
+        },
+      });
+      callData = injectPermitSignature(callData, sig);
+      logger.info({ tradeId, sigLength: sig.length }, "Permit2 signature injected into calldata");
+    }
+    call = { ...rawCall, data: callData };
+  } else {
+    // No permits — use traditional approve(router, maxUint256) path
+    const routerAddress = toHex(rawCall.target) as Address;
+    const allowance = await publicClient.readContract({
+      address: tokenAddress,
+      abi: ERC20_ABI,
+      functionName: "allowance",
+      args: [account.address, routerAddress],
+    });
+    if (allowance < rawBal) {
+      logger.info({ tradeId, spender: routerAddress }, "Approving Zora router for sell");
+      const approveTx = await walletClient.writeContract({
+        address: tokenAddress,
+        abi: ERC20_ABI,
+        functionName: "approve",
+        args: [routerAddress, maxUint256],
+        chain: base,
+        account,
+      });
+      await publicClient.waitForTransactionReceipt({ hash: approveTx, timeout: 60_000 });
+      logger.info({ tradeId, approveTx }, "Zora sell approval confirmed");
+    }
   }
+
+  const routerAddress = toHex(call.target) as Address;
 
   // ── Simulate (warning-only — Zora router can revert in eth_call) ─────────
   try {
@@ -1673,7 +1818,7 @@ router.get("/manual/trades", async (req, res): Promise<void> => {
   res.json({ trades: rows });
 });
 
-// ── Trade status ───────────────────────────────────────────────────────────
+// ── Trade status ─────────────────────────────────��─────────────────────────
 
 router.get("/manual/status/:id", async (req, res): Promise<void> => {
   const id = parseInt(req.params.id, 10);
