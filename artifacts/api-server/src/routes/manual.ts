@@ -28,6 +28,9 @@ const ZERO_ADDRESS = "0x0000000000000000000000000000000000000000" as Address;
 const ETH_ADDRESS = "0x0000000000000000000000000000000000000000" as Address;
 const BASE_CHAIN_ID = 8453;
 const LIFI_INTEGRATOR = "zorasniper001"; // Li.Fi integration ID
+/** USDC on Base — primary Zora sell output (more reliable routing than ETH for Zora Coins). */
+const USDC_BASE = "0x833589fCD6eDb6E08f4c7C32D4f71b54bdA02913" as Address;
+const USDC_DECIMALS = 6;
 
 // ── ABI definitions ────────────────────────────────────────────────────────
 
@@ -933,7 +936,9 @@ async function runLiFiSell(
 }
 
 /**
- * Sell tokens via Zora Quote API (token → ETH).
+ * Sell tokens via Zora Quote API (token → USDC), identical to sniper logic.
+ * USDC routing is more reliable than ETH for Zora Coins whose pools pair
+ * against a creator coin rather than WETH directly.
  * Uses the same EIP-1559 gas handling as the Zora buy path.
  * Throws on any failure so the caller can fall back to Li.Fi.
  */
@@ -955,7 +960,15 @@ async function runZoraSell(
     maxGasGwei = config.maxGasGwei;
   } catch { /* proceed with default */ }
 
-  // ── Fetch Zora sell quote: token → ETH (native) ──────────────────────────
+  // ── Snapshot USDC balance before sell (same as sniper) ───────────────────
+  const usdcBefore = await publicClient.readContract({
+    address: USDC_BASE,
+    abi: ERC20_ABI,
+    functionName: "balanceOf",
+    args: [account.address],
+  });
+
+  // ── Fetch Zora sell quote: token → USDC (same as sniper executeZoraSell) ──
   const _apiKey = nextZoraKey();
   const headers: Record<string, string> = { "Content-Type": "application/json" };
   if (_apiKey) headers["x-api-key"] = _apiKey;
@@ -963,7 +976,7 @@ async function runZoraSell(
   const body = JSON.stringify({
     chainId: base.id,
     tokenIn: { type: "erc20", address: tokenAddress.toLowerCase() },
-    tokenOut: { type: "eth" },
+    tokenOut: { type: "erc20", address: USDC_BASE.toLowerCase() },
     amountIn: rawBal.toString(),
     slippage: 0.1, // 10% for sells
     sender: account.address.toLowerCase(),
@@ -1073,23 +1086,29 @@ async function runZoraSell(
   }
 
   const gasUsedEth = formatEther(receipt.gasUsed * (receipt.effectiveGasPrice ?? maxFeePerGas));
-  // Use amountOut from quote if available, else estimate from toAmountMin
-  const ethRecovered = data.quote?.amountOut
-    ? formatEther(BigInt(data.quote.amountOut))
-    : "0";
-  const pnl = (parseFloat(ethRecovered) - parseFloat(buyAmountEth)).toFixed(6);
+
+  // ── Calculate USDC received via balance diff (same as sniper) ────────────
+  const usdcAfter = await publicClient.readContract({
+    address: USDC_BASE,
+    abi: ERC20_ABI,
+    functionName: "balanceOf",
+    args: [account.address],
+  });
+  const usdcReceived = usdcAfter > usdcBefore ? usdcAfter - usdcBefore : 0n;
+  // sellAmountEth stores USDC received (6 decimals) — same convention as sniper
+  const sellAmountUsdc = formatUnits(usdcReceived, USDC_DECIMALS);
 
   await db
     .update(tradesTable)
-    .set({ status: "sold", sellTxHash: txHash, sellAmountEth: ethRecovered, pnlEth: pnl })
+    .set({ status: "sold", sellTxHash: txHash, sellAmountEth: sellAmountUsdc, pnlEth: sellAmountUsdc })
     .where(eq(tradesTable.id, tradeId));
 
-  logger.info({ tradeId, ethRecovered, pnl, gasUsedEth, txHash }, "Zora sell confirmed");
+  logger.info({ tradeId, sellAmountUsdc, gasUsedEth, txHash }, "Zora sell confirmed (token → USDC)");
 }
 
 /**
- * Executes an immediate market sell: tries Zora API first (token → ETH),
- * falls back to Li.Fi if Zora fails for any reason.
+ * Executes an immediate market sell: tries Zora API first (token → USDC,
+ * same as sniper), falls back to Li.Fi if Zora fails for any reason.
  * Updates the trade record to "sold" on success, "confirmed" (with failReason) on total failure.
  */
 async function runMarketSell(
