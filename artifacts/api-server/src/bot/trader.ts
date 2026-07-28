@@ -451,6 +451,7 @@ async function executeZoraSwapTx(params: {
   }
 
   // Simulate (warning-only — Zora router often reverts in eth_call)
+  let simFailed = false;
   try {
     await publicClient.call({
       to: routerAddress,
@@ -460,11 +461,16 @@ async function executeZoraSwapTx(params: {
     });
     logger.info(logCtx, "Swap simulation passed");
   } catch (simErr) {
+    simFailed = true;
     const msg = simErr instanceof Error ? simErr.message.slice(0, 200) : String(simErr);
     logger.warn({ ...logCtx, msg }, "Swap simulation warning — proceeding");
   }
 
   // Gas estimation with fallback
+  // IMPORTANT: if estimateGas itself reverts (EstimateGasExecutionError / execution reverted),
+  // that means the tx body is bad (invalid signature, slippage exceeded, etc.) and WILL revert
+  // on-chain. Do NOT waste gas — throw immediately so the caller can fall back to Li.Fi.
+  // Only use the 500k fallback for node/network-level errors (timeout, RPC unavailable, etc.).
   const maxFeeCapWei = BigInt(Math.round(maxGasGwei * 1e9));
   let feeEstimate: { maxFeePerGas: bigint; maxPriorityFeePerGas: bigint };
   let estimatedGas: bigint;
@@ -481,7 +487,23 @@ async function executeZoraSwapTx(params: {
     feeEstimate = fees;
     estimatedGas = gas;
   } catch (gasErr) {
-    logger.warn({ ...logCtx, err: gasErr }, "Gas estimation failed — using 500k fallback");
+    const gasErrMsg = gasErr instanceof Error ? gasErr.message : String(gasErr);
+    const isExecutionRevert =
+      gasErrMsg.includes("EstimateGasExecutionError") ||
+      gasErrMsg.includes("execution reverted") ||
+      gasErrMsg.includes("Execution reverted") ||
+      gasErrMsg.includes("reverted");
+    if (isExecutionRevert) {
+      // Tx body is known-bad — throwing here causes caller to fall back to Li.Fi
+      // instead of spending ETH on a transaction that will definitely revert.
+      throw new Error(`Gas estimation reverted — aborting to avoid wasted gas: ${gasErrMsg.slice(0, 300)}`);
+    }
+    // Node/network error only — use 500k fallback if simulation also passed
+    if (simFailed) {
+      // Both simulation AND gas estimation failed — the tx is almost certainly bad.
+      throw new Error(`Both simulation and gas estimation failed — aborting: ${gasErrMsg.slice(0, 300)}`);
+    }
+    logger.warn({ ...logCtx, err: gasErrMsg.slice(0, 200) }, "Gas estimation failed (node error) — using 500k fallback");
     feeEstimate = await publicClient.estimateFeesPerGas();
     estimatedGas = 500_000n;
   }
@@ -492,6 +514,24 @@ async function executeZoraSwapTx(params: {
       ? feeEstimate.maxPriorityFeePerGas
       : maxFeePerGas;
   const gasLimit = (estimatedGas * 120n) / 100n;
+
+  // Pre-flight ETH balance check — avoid "insufficient funds" error from RPC
+  // by detecting it early with a clear log message.
+  const txValue = toBigIntSafe(call.value);
+  const estimatedCost = gasLimit * maxFeePerGas + txValue;
+  const ethBalance = await publicClient.getBalance({ address: account.address });
+  if (ethBalance < estimatedCost) {
+    throw new Error(
+      `Insufficient ETH for gas: wallet has ${formatEther(ethBalance)} ETH, ` +
+      `estimated cost ${formatEther(estimatedCost)} ETH ` +
+      `(gas ${gasLimit} × maxFeePerGas ${maxFeePerGas} + value ${txValue})`,
+    );
+  }
+
+  logger.info(
+    { ...logCtx, estimatedGas: estimatedGas.toString(), gasLimit: gasLimit.toString(), maxFeePerGas: maxFeePerGas.toString() },
+    "Zora sell: gas estimated",
+  );
 
   const txHash = await walletClient.sendTransaction({
     to: routerAddress,
@@ -688,10 +728,24 @@ async function executeLiFiSell(params: {
         : fees.maxFeePerGas;
   } catch { /* let viem fall back to its own estimation */ }
 
+  // Pre-flight ETH balance check for Li.Fi sell
+  const lifiTxValue = BigInt(sellTx.value || "0");
+  const lifiGasLimit = sellTx.gasLimit ? BigInt(sellTx.gasLimit) : 500_000n;
+  if (maxFeePerGas) {
+    const lifiEstimatedCost = lifiGasLimit * maxFeePerGas + lifiTxValue;
+    const lifiEthBalance = await publicClient.getBalance({ address: account.address });
+    if (lifiEthBalance < lifiEstimatedCost) {
+      throw new Error(
+        `Li.Fi sell aborted — insufficient ETH for gas: wallet has ${formatEther(lifiEthBalance)} ETH, ` +
+        `estimated cost ~${formatEther(lifiEstimatedCost)} ETH`,
+      );
+    }
+  }
+
   const hash = await walletClient.sendTransaction({
     to: sellTx.to as Address,
     data: sellTx.data as `0x${string}`,
-    value: BigInt(sellTx.value || "0"),
+    value: lifiTxValue,
     gas: sellTx.gasLimit ? BigInt(sellTx.gasLimit) : undefined,
     maxFeePerGas,
     maxPriorityFeePerGas,
