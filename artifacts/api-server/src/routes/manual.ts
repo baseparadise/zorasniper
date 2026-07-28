@@ -111,18 +111,29 @@ interface ZoraCall {
   value: string;
 }
 
+interface ZoraQuoteResult {
+  call: ZoraCall;
+  /** Raw token amount out (string, 18 decimals) from the API response. May be
+   *  undefined if the API does not include it in this version. */
+  amountOut: string | null;
+}
+
 /**
  * Fetch a BUY quote from Zora Quote API (ETH → erc20).
  * Identical to the implementation in trader.ts (sniper path).
  * Retries up to 3 times with a 5-second delay — Zora pools need a few blocks
  * after deployment before they are ready to quote.
+ *
+ * Returns both the calldata (needed for tx submission) and amountOut
+ * (used by the simulate endpoint to show accurate price estimates for the
+ * actual buy amount, avoiding the probe-vs-real-amount price impact gap).
  */
 async function fetchZoraQuote(params: {
   tokenAddress: string;
   buyAmountWei: bigint;
   slippage: number; // fractional, e.g. 0.05 for 5%
   sender: string;
-}): Promise<ZoraCall> {
+}): Promise<ZoraQuoteResult> {
   const headers: Record<string, string> = { "Content-Type": "application/json" };
   const _apiKey = nextZoraKey();
   if (_apiKey) headers["x-api-key"] = _apiKey;
@@ -177,8 +188,15 @@ async function fetchZoraQuote(params: {
       throw new Error(`Zora quote returned no call: ${JSON.stringify(data).slice(0, 200)}`);
     }
 
-    logger.info({ attempt, target: data.call.target }, "Zora buy quote OK");
-    return data.call as ZoraCall;
+    const amountOut: string | null =
+      data.quote?.amountOut ??
+      data.amountOut ??
+      data.result?.amountOut ??
+      data.swapResult?.amountOut ??
+      null;
+
+    logger.info({ attempt, target: data.call.target, amountOut }, "Zora buy quote OK");
+    return { call: data.call as ZoraCall, amountOut };
   }
 
   throw new Error("Zora quote failed after 3 attempts — pool not ready or token invalid");
@@ -684,12 +702,13 @@ async function runBuy(
     // If the quote fails (not a Zora token / pool not available) — use Li.Fi.
     let zoraCall: ZoraCall | null = null;
     try {
-      zoraCall = await fetchZoraQuote({
+      const zoraResult = await fetchZoraQuote({
         tokenAddress,
         buyAmountWei,
         slippage,
         sender: account.address,
       });
+      zoraCall = zoraResult.call;
       logger.info(
         { tradeId, target: zoraCall.target },
         "Manual buy: Zora quote OK — using Zora path",
@@ -1082,21 +1101,23 @@ router.post("/manual/simulate", async (req, res): Promise<void> => {
 
   // Step 2a: Try Zora Quote
   try {
-    await fetchZoraQuote({
+    const { amountOut: zoraAmountOut } = await fetchZoraQuote({
       tokenAddress,
       buyAmountWei: parseEther(buyAmountEth),
       slippage: 0.05,
       sender: simAccount,
     });
 
-    // Zora quote succeeded — estimate tokens via price probe
-    const zoraPrice = await fetchZoraPriceProbe(addr, simAccount);
-    if (zoraPrice !== null) {
+    // Use amountOut directly from the quote response — this reflects actual
+    // price impact for the requested buyAmountEth, unlike the 0.001 ETH probe.
+    if (zoraAmountOut) {
+      const tokensOut = parseFloat(formatUnits(BigInt(zoraAmountOut), 18));
       const ethNum = parseFloat(buyAmountEth);
-      const expectedTokens = ethNum / zoraPrice;
-      result.expectedTokensOut = expectedTokens.toFixed(6);
-      result.minOrderSize = (expectedTokens * 0.95).toFixed(6); // 5% slippage floor
-      result.entryPriceEth = zoraPrice.toFixed(18);
+      if (tokensOut > 0) {
+        result.expectedTokensOut = tokensOut.toFixed(6);
+        result.minOrderSize = (tokensOut * 0.95).toFixed(6); // 5% slippage floor
+        result.entryPriceEth = (ethNum / tokensOut).toFixed(18);
+      }
     }
 
     result.route = "zora";
