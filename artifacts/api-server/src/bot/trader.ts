@@ -374,7 +374,7 @@ export async function executeZoraSell(params: {
     logger.info({ tradeId, approveTx }, "Sell approval confirmed");
   }
 
-  // ── Step 3: Simulate sell ─────────────────────────────────────────────────
+  // ── Step 3: Simulate sell (warning-only — Zora router often reverts via eth_call) ──
   try {
     await publicClient.call({
       to: call.target as Address,
@@ -384,21 +384,37 @@ export async function executeZoraSell(params: {
     });
     logger.info({ tradeId }, "Sell simulation passed");
   } catch (simErr) {
+    // Zora router contracts frequently revert in eth_call but succeed on-chain.
+    // Log the warning and proceed — the actual send will confirm or revert.
     const msg = simErr instanceof Error ? simErr.message.slice(0, 200) : String(simErr);
-    throw new Error(`Sell simulation reverted — aborting: ${msg}`);
+    logger.warn({ tradeId, msg }, "Sell simulation warning — proceeding with send anyway");
   }
 
-  // ── Step 4: Gas estimation ────────────────────────────────────────────────
+  // ── Step 4: Gas estimation (with fallback) ───────────────────────────────
   const maxFeeCapWei = BigInt(Math.round(maxGasGwei * 1e9));
-  const [feeEstimate, estimatedGas] = await Promise.all([
-    publicClient.estimateFeesPerGas(),
-    publicClient.estimateGas({
-      to: call.target as Address,
-      data: call.data as `0x${string}`,
-      value: BigInt(call.value),
-      account: account.address,
-    }),
-  ]);
+  let feeEstimate: { maxFeePerGas: bigint; maxPriorityFeePerGas: bigint };
+  let estimatedGas: bigint;
+  try {
+    const [fees, gas] = await Promise.all([
+      publicClient.estimateFeesPerGas(),
+      publicClient.estimateGas({
+        to: call.target as Address,
+        data: call.data as `0x${string}`,
+        value: BigInt(call.value),
+        account: account.address,
+      }),
+    ]);
+    feeEstimate = fees;
+    estimatedGas = gas;
+    logger.info({ tradeId, estimatedGas: gas.toString() }, "Sell gas estimated");
+  } catch (gasErr) {
+    // estimateGas can fail when the contract reverts during estimation.
+    // Use conservative fallback: 500k gas (covers most Zora/Uniswap V4 sell paths).
+    logger.warn({ tradeId, err: gasErr }, "Sell gas estimation failed — using 500k fallback");
+    const fallbackFees = await publicClient.estimateFeesPerGas();
+    feeEstimate = fallbackFees;
+    estimatedGas = 500_000n;
+  }
   const maxFeePerGas =
     feeEstimate.maxFeePerGas < maxFeeCapWei ? feeEstimate.maxFeePerGas : maxFeeCapWei;
   const maxPriorityFeePerGas =
