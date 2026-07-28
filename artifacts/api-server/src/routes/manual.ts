@@ -1078,7 +1078,7 @@ router.post("/manual/simulate", async (req, res): Promise<void> => {
 
   // Step 2a: Try Zora Quote
   try {
-    const zoraCall = await fetchZoraQuote({
+    await fetchZoraQuote({
       tokenAddress,
       buyAmountWei: parseEther(buyAmountEth),
       slippage: 0.05,
