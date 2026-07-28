@@ -511,11 +511,20 @@ async function executeZoraSwapTx(params: {
     estimatedGas = gas;
   } catch (gasErr) {
     const gasErrMsg = gasErr instanceof Error ? gasErr.message : String(gasErr);
+    // viem v2 stores error info across multiple fields:
+    //   .name        → "EstimateGasExecutionError"
+    //   .shortMessage → "Execution reverted for an unknown reason."
+    //   .details     → "execution reverted"
+    //   .message     → formatted multi-line string (may or may not include "reverted")
+    // Checking only .message misses cases where the revert lives in .name/.details/.shortMessage.
+    const gasErrName = gasErr instanceof Error ? (gasErr.name ?? "") : "";
+    const gasErrDetails = String((gasErr as any)?.details ?? "");
+    const gasErrShort = String((gasErr as any)?.shortMessage ?? "");
+    const combinedErrText = [gasErrMsg, gasErrName, gasErrDetails, gasErrShort].join(" ");
     const isExecutionRevert =
-      gasErrMsg.includes("EstimateGasExecutionError") ||
-      gasErrMsg.includes("execution reverted") ||
-      gasErrMsg.includes("Execution reverted") ||
-      gasErrMsg.includes("reverted");
+      combinedErrText.includes("EstimateGasExecutionError") ||
+      combinedErrText.toLowerCase().includes("execution reverted") ||
+      combinedErrText.toLowerCase().includes("reverted");
     if (isExecutionRevert) {
       // Tx body is known-bad — throwing here causes caller to fall back to Li.Fi
       // instead of spending ETH on a transaction that will definitely revert.
