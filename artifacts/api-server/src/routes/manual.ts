@@ -146,10 +146,14 @@ async function fetchZoraQuote(params: {
 
     if (!res.ok) {
       const text = await res.text().catch(() => "");
+      // Only retry for "pool not ready yet" messages — specific to newly deployed
+      // Zora Coin pools that need a few blocks before they are quotable.
+      // A plain 400 without those markers means the token is simply not on Zora
+      // (e.g. USDC, WETH, arbitrary ERC20) — throw immediately so Li.Fi fallback
+      // kicks in without a ~10 s delay.
       const isPoolNotReady =
         text.includes("Cannot read properties of null") ||
-        text.includes("UNKNOWN") ||
-        res.status === 400;
+        text.includes("UNKNOWN");
 
       if (isPoolNotReady && attempt < 3) {
         logger.warn(
