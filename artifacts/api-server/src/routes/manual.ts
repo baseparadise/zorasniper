@@ -1568,7 +1568,11 @@ router.get("/positions", async (_req, res): Promise<void> => {
   try {
     walletAddress = privateKeyToAccount(getWalletKey()).address;
   } catch {
-    walletAddress = ZERO_ADDRESS;
+    // Cannot check balances without a wallet — return error immediately.
+    // Falling back to ZERO_ADDRESS would cause every position to read 0n
+    // balance and get auto-closed as "sold externally" in the loop below.
+    res.status(503).json({ error: "Wallet not configured (WALLET_PRIVATE_KEY not set)" });
+    return;
   }
 
   const settled = await Promise.all(
