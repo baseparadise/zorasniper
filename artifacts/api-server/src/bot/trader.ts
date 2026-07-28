@@ -568,7 +568,17 @@ async function executeZoraSwapTx(params: {
   });
 
   logger.info({ ...logCtx, txHash }, "Swap tx submitted");
-  const receipt = await publicClient.waitForTransactionReceipt({ hash: txHash, timeout: 60_000 });
+
+  let receipt: Awaited<ReturnType<typeof publicClient.waitForTransactionReceipt>>;
+  try {
+    receipt = await publicClient.waitForTransactionReceipt({ hash: txHash, timeout: 120_000 });
+  } catch (receiptErr) {
+    // Receipt timeout: tx was broadcast but we don't know if it landed.
+    // Include the txHash in the error so callers can persist it in the DB
+    // and the user can manually verify on a block explorer.
+    const baseMsg = receiptErr instanceof Error ? receiptErr.message : String(receiptErr);
+    throw new Error(`Receipt timeout for txHash ${txHash}: ${baseMsg.slice(0, 200)}`);
+  }
 
   if (receipt.status !== "success") {
     throw new Error(`Swap tx reverted on-chain: ${txHash}`);
@@ -1301,6 +1311,26 @@ export async function monitorTpSlSniper(
 
       if (!reason) continue;
 
+      // ── Atomic sell claim — prevents double-sell race condition ───────────
+      // Between the status check above and this point, a manual sell or another
+      // recovery monitor could also read "confirmed" and start selling.
+      // We atomically flip status confirmed → selling here; if 0 rows are
+      // affected another process already claimed the sell and we bail.
+      const [claimed] = await db
+        .update(tradesTable)
+        .set({ status: "selling" })
+        .where(and(eq(tradesTable.id, tradeId), eq(tradesTable.status, "confirmed")))
+        .returning({ id: tradesTable.id });
+
+      if (!claimed) {
+        logger.warn(
+          { tradeId },
+          "Sniper TP/SL: sell already claimed by another process — bailing",
+        );
+        active = false;
+        return;
+      }
+
       active = false;
       logger.info(
         { tradeId, reason, currentPrice, tpPrice, slPrice },
@@ -1342,9 +1372,17 @@ export async function monitorTpSlSniper(
         );
         if (sellAttempts >= MAX_SELL_ATTEMPTS) {
           logger.error({ tradeId }, "Sniper TP/SL: max sell attempts reached — monitor exiting");
+          await db
+            .update(tradesTable)
+            .set({ status: "failed", failReason: "Max TP/SL sell attempts reached" })
+            .where(eq(tradesTable.id, tradeId));
           return;
         }
-        // Re-activate to retry on the next poll cycle
+        // Reset to confirmed so the next retry can reclaim the sell
+        await db
+          .update(tradesTable)
+          .set({ status: "confirmed" })
+          .where(eq(tradesTable.id, tradeId));
         active = true;
       }
     } catch (err) {
@@ -1360,6 +1398,25 @@ export async function monitorTpSlSniper(
  */
 export async function recoverSniperTpSlMonitors(): Promise<void> {
   try {
+    // Reset any trades stuck in "selling" — these were mid-sell when the server
+    // crashed.  The sell tx may or may not have landed on-chain; the monitor
+    // will re-read price/balance on the next poll cycle and retry if needed.
+    const stuckCount = await db
+      .update(tradesTable)
+      .set({ status: "confirmed" })
+      .where(
+        and(
+          eq(tradesTable.source, "sniper"),
+          eq(tradesTable.status, "selling"),
+        ),
+      );
+    if ((stuckCount.rowCount ?? 0) > 0) {
+      logger.warn(
+        { count: stuckCount.rowCount },
+        "Sniper TP/SL recovery: reset stuck 'selling' trades back to 'confirmed'",
+      );
+    }
+
     const openTrades = await db
       .select()
       .from(tradesTable)

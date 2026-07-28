@@ -803,6 +803,27 @@ async function monitorTpSl(
       if (!shouldTp && !shouldSl) continue;
 
       const reason = shouldTp ? "take_profit" : "stop_loss";
+
+      // ── Atomic sell claim — prevents double-sell race condition ───────────
+      // Between the status check above and this point, a manual sell or another
+      // recovery monitor could also read "confirmed" and start selling.
+      // We atomically flip status confirmed → selling here; if 0 rows are
+      // affected another process already claimed the sell and we bail.
+      const [claimed] = await db
+        .update(tradesTable)
+        .set({ status: "selling" })
+        .where(and(eq(tradesTable.id, tradeId), eq(tradesTable.status, "confirmed")))
+        .returning({ id: tradesTable.id });
+
+      if (!claimed) {
+        logger.warn(
+          { tradeId },
+          "TP/SL: sell already claimed by another process — bailing",
+        );
+        active = false;
+        return;
+      }
+
       logger.info({ tradeId, reason, currentPrice, tpPrice, slPrice }, "TP/SL triggered, executing sell");
 
       // Stop the loop unless the sell fails and we need to retry
@@ -841,8 +862,17 @@ async function monitorTpSl(
         logger.error({ err, tradeId, sellAttempts, maxAttempts: MAX_SELL_ATTEMPTS }, "TP/SL sell failed");
         if (sellAttempts >= MAX_SELL_ATTEMPTS) {
           logger.error({ tradeId }, "Max sell attempts reached — monitor exiting");
+          await db
+            .update(tradesTable)
+            .set({ status: "failed", failReason: "Max TP/SL sell attempts reached" })
+            .where(eq(tradesTable.id, tradeId));
           return;
         }
+        // Reset to confirmed so the next retry can reclaim the sell
+        await db
+          .update(tradesTable)
+          .set({ status: "confirmed" })
+          .where(eq(tradesTable.id, tradeId));
         // Re-activate to retry sell on next poll cycle
         active = true;
       } else {
@@ -1819,6 +1849,25 @@ router.get("/manual/status/:id", async (req, res): Promise<void> => {
  */
 export async function recoverTpSlMonitors(): Promise<void> {
   try {
+    // Reset any trades stuck in "selling" — these were mid-sell when the server
+    // crashed.  The sell tx may or may not have landed on-chain; the monitor
+    // will re-read price/balance on the next poll cycle and retry if needed.
+    const stuckCount = await db
+      .update(tradesTable)
+      .set({ status: "confirmed" })
+      .where(
+        and(
+          eq(tradesTable.source, 'manual'),
+          eq(tradesTable.status, 'selling'),
+        ),
+      );
+    if ((stuckCount.rowCount ?? 0) > 0) {
+      logger.warn(
+        { count: stuckCount.rowCount },
+        "TP/SL recovery: reset stuck 'selling' trades back to 'confirmed'",
+      );
+    }
+
     const openTrades = await db
       .select()
       .from(tradesTable)
