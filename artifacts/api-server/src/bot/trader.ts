@@ -96,9 +96,23 @@ interface ZoraCall {
   value: string;
 }
 
-/** Ensure a hex string has the 0x prefix — Zora API sometimes omits it. */
+/**
+ * Ensure a hex string is valid and has the 0x prefix.
+ * Zora API sometimes omits the prefix, and may include whitespace/newlines
+ * in the JSON response. Throws immediately if the result is not valid hex —
+ * better to fail fast than to send malformed calldata and get
+ * "Invalid byte sequence" from the Base RPC.
+ */
 function toHex(s: string): `0x${string}` {
-  const clean = s && s.startsWith("0x") ? s : `0x${s ?? ""}`;
+  if (!s) return "0x";
+  // Strip whitespace / newlines that can appear in Zora API JSON responses
+  const stripped = s.trim().replace(/[\s\r\n]/g, "");
+  const clean = stripped.startsWith("0x") ? stripped : `0x${stripped}`;
+  if (!/^0x[0-9a-fA-F]*$/.test(clean)) {
+    throw new Error(
+      `toHex: invalid hex from Zora API (first 80 chars): ${clean.slice(0, 80)}`,
+    );
+  }
   return clean as `0x${string}`;
 }
 
