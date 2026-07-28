@@ -828,8 +828,16 @@ async function monitorTpSl(
         break;
       }
 
-      await runLiFiSell(tradeId, tokenAddress, rawBal, buyAmountEth, 10);
-      logger.info({ tradeId, reason }, "TP/SL sell confirmed via Li.Fi");
+      // ── Try Zora first, fallback to Li.Fi ──────────────────────────────
+      try {
+        await runZoraSell(tradeId, tokenAddress, rawBal, buyAmountEth);
+        logger.info({ tradeId, reason }, "TP/SL sell confirmed via Zora");
+      } catch (zoraErr) {
+        const zoraMsg = (zoraErr instanceof Error ? zoraErr.message : String(zoraErr)).slice(0, 200);
+        logger.warn({ tradeId, zoraMsg }, "TP/SL: Zora sell failed — falling back to Li.Fi");
+        await runLiFiSell(tradeId, tokenAddress, rawBal, buyAmountEth, 10);
+        logger.info({ tradeId, reason }, "TP/SL sell confirmed via Li.Fi");
+      }
       break;
     } catch (err) {
       sellAttempts++;
@@ -881,12 +889,25 @@ async function runLiFiSell(
     );
   }
 
+  // ── EIP-1559 gas — explicit fees to prevent Alchemy "invalid params" error ──
   const { transactionRequest: sellTx } = sellQuote;
+  let liFiMaxFeePerGas: bigint | undefined;
+  let liFiMaxPriorityFeePerGas: bigint | undefined;
+  try {
+    const fees = await publicClient.estimateFeesPerGas();
+    liFiMaxFeePerGas = fees.maxFeePerGas;
+    liFiMaxPriorityFeePerGas = fees.maxPriorityFeePerGas < fees.maxFeePerGas
+      ? fees.maxPriorityFeePerGas
+      : fees.maxFeePerGas;
+  } catch { /* let viem fall back to its own estimation */ }
+
   const hash = await walletClient.sendTransaction({
     to: sellTx.to as Address,
     data: sellTx.data as `0x${string}`,
     value: BigInt(sellTx.value || "0"),
     gas: sellTx.gasLimit ? BigInt(sellTx.gasLimit) : undefined,
+    maxFeePerGas: liFiMaxFeePerGas,
+    maxPriorityFeePerGas: liFiMaxPriorityFeePerGas,
     account,
     chain: base,
   });
@@ -912,8 +933,164 @@ async function runLiFiSell(
 }
 
 /**
- * Executes an immediate market sell of all tokens for a position via Li.Fi.
- * Updates the trade record to "sold" on success, "confirmed" (with failReason) on failure.
+ * Sell tokens via Zora Quote API (token → ETH).
+ * Uses the same EIP-1559 gas handling as the Zora buy path.
+ * Throws on any failure so the caller can fall back to Li.Fi.
+ */
+async function runZoraSell(
+  tradeId: number,
+  tokenAddress: Address,
+  rawBal: bigint,
+  buyAmountEth: string,
+): Promise<void> {
+  const account = privateKeyToAccount(getWalletKey());
+  const httpUrl = getHttpRpcUrl();
+  const publicClient = createPublicClient({ chain: base, transport: http(httpUrl) });
+  const walletClient = createWalletClient({ account, chain: base, transport: http(httpUrl) });
+
+  // Load config for gas cap — sensible default if config unavailable
+  let maxGasGwei = 10;
+  try {
+    const config = await loadConfig();
+    maxGasGwei = config.maxGasGwei;
+  } catch { /* proceed with default */ }
+
+  // ── Fetch Zora sell quote: token → ETH (native) ──────────────────────────
+  const _apiKey = nextZoraKey();
+  const headers: Record<string, string> = { "Content-Type": "application/json" };
+  if (_apiKey) headers["x-api-key"] = _apiKey;
+
+  const body = JSON.stringify({
+    chainId: base.id,
+    tokenIn: { type: "erc20", address: tokenAddress.toLowerCase() },
+    tokenOut: { type: "eth" },
+    amountIn: rawBal.toString(),
+    slippage: 0.1, // 10% for sells
+    sender: account.address.toLowerCase(),
+    recipient: account.address.toLowerCase(),
+  });
+
+  const res = await fetch(`${ZORA_QUOTE_API}/quote`, { method: "POST", headers, body });
+  if (!res.ok) {
+    const text = await res.text().catch(() => "");
+    throw new Error(`Zora sell quote HTTP ${res.status}: ${text.slice(0, 200)}`);
+  }
+  const data = await res.json();
+  if (!data.call) {
+    throw new Error(`Zora sell quote returned no call: ${JSON.stringify(data).slice(0, 200)}`);
+  }
+  const call: ZoraCall = data.call;
+  const routerAddress = toHex(call.target) as Address;
+
+  logger.info({ tradeId, target: call.target }, "Zora sell quote OK");
+
+  // ── Approve router to spend tokens if needed ─────────────────────────────
+  const allowance = await publicClient.readContract({
+    address: tokenAddress,
+    abi: ERC20_ABI,
+    functionName: "allowance",
+    args: [account.address, routerAddress],
+  });
+  if (allowance < rawBal) {
+    logger.info({ tradeId, spender: routerAddress }, "Approving Zora router for sell");
+    const approveTx = await walletClient.writeContract({
+      address: tokenAddress,
+      abi: ERC20_ABI,
+      functionName: "approve",
+      args: [routerAddress, maxUint256],
+      chain: base,
+      account,
+    });
+    await publicClient.waitForTransactionReceipt({ hash: approveTx, timeout: 60_000 });
+    logger.info({ tradeId, approveTx }, "Zora sell approval confirmed");
+  }
+
+  // ── Simulate (warning-only — Zora router can revert in eth_call) ─────────
+  try {
+    await publicClient.call({
+      to: routerAddress,
+      data: toHex(call.data),
+      value: toBigIntSafe(call.value),
+      account: account.address,
+    });
+    logger.info({ tradeId }, "Zora sell simulation passed");
+  } catch (simErr) {
+    const msg = simErr instanceof Error ? simErr.message.slice(0, 200) : String(simErr);
+    logger.warn({ tradeId, msg }, "Zora sell simulation warning — proceeding");
+  }
+
+  // ── EIP-1559 gas with cap ─────────────────────────────────────────────────
+  const maxFeeCapWei = BigInt(Math.round(maxGasGwei * 1e9));
+  let feeEstimate: { maxFeePerGas: bigint; maxPriorityFeePerGas: bigint };
+  let estimatedGas: bigint;
+  try {
+    const [fees, gas] = await Promise.all([
+      publicClient.estimateFeesPerGas(),
+      publicClient.estimateGas({
+        to: routerAddress,
+        data: toHex(call.data),
+        value: toBigIntSafe(call.value),
+        account: account.address,
+      }),
+    ]);
+    feeEstimate = fees;
+    estimatedGas = gas;
+  } catch (gasErr) {
+    logger.warn({ tradeId, err: gasErr }, "Zora sell gas estimation failed — using 500k fallback");
+    feeEstimate = await publicClient.estimateFeesPerGas();
+    estimatedGas = 500_000n;
+  }
+  const maxFeePerGas = feeEstimate.maxFeePerGas < maxFeeCapWei
+    ? feeEstimate.maxFeePerGas
+    : maxFeeCapWei;
+  const maxPriorityFeePerGas = feeEstimate.maxPriorityFeePerGas < maxFeePerGas
+    ? feeEstimate.maxPriorityFeePerGas
+    : maxFeePerGas;
+  const gasLimit = (estimatedGas * 120n) / 100n;
+
+  logger.info(
+    { tradeId, estimatedGas: estimatedGas.toString(), maxFeePerGas: maxFeePerGas.toString() },
+    "Zora sell: gas estimated",
+  );
+
+  // ── Send tx ───────────────────────────────────────────────────────────────
+  const txHash = await walletClient.sendTransaction({
+    to: routerAddress,
+    data: toHex(call.data),
+    value: toBigIntSafe(call.value),
+    chain: base,
+    account,
+    gas: gasLimit,
+    maxFeePerGas,
+    maxPriorityFeePerGas,
+  });
+
+  logger.info({ tradeId, txHash }, "Zora sell tx submitted");
+  const receipt = await publicClient.waitForTransactionReceipt({ hash: txHash, timeout: 60_000 });
+
+  if (receipt.status !== "success") {
+    throw new Error(`Zora sell tx reverted on-chain: ${txHash}`);
+  }
+
+  const gasUsedEth = formatEther(receipt.gasUsed * (receipt.effectiveGasPrice ?? maxFeePerGas));
+  // Use amountOut from quote if available, else estimate from toAmountMin
+  const ethRecovered = data.quote?.amountOut
+    ? formatEther(BigInt(data.quote.amountOut))
+    : "0";
+  const pnl = (parseFloat(ethRecovered) - parseFloat(buyAmountEth)).toFixed(6);
+
+  await db
+    .update(tradesTable)
+    .set({ status: "sold", sellTxHash: txHash, sellAmountEth: ethRecovered, pnlEth: pnl })
+    .where(eq(tradesTable.id, tradeId));
+
+  logger.info({ tradeId, ethRecovered, pnl, gasUsedEth, txHash }, "Zora sell confirmed");
+}
+
+/**
+ * Executes an immediate market sell: tries Zora API first (token → ETH),
+ * falls back to Li.Fi if Zora fails for any reason.
+ * Updates the trade record to "sold" on success, "confirmed" (with failReason) on total failure.
  */
 async function runMarketSell(
   tradeId: number,
@@ -921,11 +1098,21 @@ async function runMarketSell(
   rawBal: bigint,
   buyAmountEth: string,
 ): Promise<void> {
+  // ── Try Zora first (consistent with buy path) ─────────────────────────────
+  try {
+    await runZoraSell(tradeId, tokenAddress, rawBal, buyAmountEth);
+    return;
+  } catch (zoraErr) {
+    const zoraMsg = (zoraErr instanceof Error ? zoraErr.message : String(zoraErr)).slice(0, 200);
+    logger.warn({ tradeId, zoraMsg }, "Zora sell failed — falling back to Li.Fi");
+  }
+
+  // ── Li.Fi fallback ────────────────────────────────────────────────────────
   try {
     await runLiFiSell(tradeId, tokenAddress, rawBal, buyAmountEth);
   } catch (err) {
     const failReason = (err instanceof Error ? err.message : String(err)).slice(0, 500);
-    logger.error({ err, tradeId, failReason }, "Market sell via Li.Fi failed");
+    logger.error({ err, tradeId, failReason }, "Market sell via Li.Fi also failed");
     await db
       .update(tradesTable)
       .set({ status: "confirmed", failReason })
