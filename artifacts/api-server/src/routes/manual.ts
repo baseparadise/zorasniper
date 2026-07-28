@@ -569,6 +569,21 @@ async function executeViaLiFi(
     "Li.Fi quote received",
   );
 
+  // ── Snapshot token balance BEFORE sending tx ─────────────────────────────
+  // Must read current state before the tx so the diff is accurate even if
+  // the wallet already holds some of the same token.
+  let balBeforeBuy = 0n;
+  try {
+    balBeforeBuy = await publicClient.readContract({
+      address: tokenAddress,
+      abi: ERC20_ABI,
+      functionName: "balanceOf",
+      args: [account.address],
+    });
+  } catch {
+    // Keep 0n — diff will still be correct for a fresh position
+  }
+
   const hash = await walletClient.sendTransaction({
     to: transactionRequest.to as Address,
     data: transactionRequest.data as `0x${string}`,
@@ -585,22 +600,24 @@ async function executeViaLiFi(
   if (receipt.status === "success") {
     const gasUsedEth = formatEther(receipt.gasUsed * receipt.effectiveGasPrice);
 
-    // Determine tokens received: check actual on-chain balance delta
+    // ── Measure tokens received via balanceOf diff ────────────────────────
+    // balBeforeBuy was snapshotted before the tx was sent.
+    // Fall back to estimate.toAmountMin only if the on-chain read fails.
     let tokenAmount = "0";
     try {
-      const rawBal = await publicClient.readContract({
+      const balAfter = await publicClient.readContract({
         address: tokenAddress,
         abi: ERC20_ABI,
         functionName: "balanceOf",
         args: [account.address],
       });
-      const minOut = BigInt(estimate.toAmountMin);
-      if (rawBal >= minOut && rawBal > 0n) {
-        tokenAmount = formatUnits(BigInt(estimate.toAmount), 18);
-      } else if (rawBal > 0n) {
-        tokenAmount = formatUnits(rawBal, 18);
-      } else if (minOut > 0n) {
-        tokenAmount = formatUnits(minOut, 18);
+      const received = balAfter > balBeforeBuy ? balAfter - balBeforeBuy : 0n;
+      if (received > 0n) {
+        tokenAmount = formatUnits(received, 18);
+        logger.info({ tradeId, received: received.toString(), tokenAddress }, "Token amount measured via balanceOf diff (Li.Fi)");
+      } else if (estimate.toAmountMin && BigInt(estimate.toAmountMin) > 0n) {
+        tokenAmount = formatUnits(BigInt(estimate.toAmountMin), 18);
+        logger.warn({ tradeId, tokenAddress }, "balanceOf diff: no increase detected — using estimate.toAmountMin");
       }
     } catch {
       if (estimate.toAmountMin && BigInt(estimate.toAmountMin) > 0n) {
