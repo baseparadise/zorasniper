@@ -51,6 +51,9 @@ const ERC20_ABI = [
 // Zora Quote API endpoint
 const ZORA_QUOTE_API = "https://api-sdk.zora.engineering";
 
+// Permit2 universal contract address (same on all EVM chains)
+const PERMIT2_ADDRESS = "0x000000000022D473030F116dDEE9F6B43aC78BA3" as Address;
+
 // ── Zora API key rotator ─────────────────────────────────────────────────────
 // Supports multiple keys via ZORA_API_KEYS (comma-separated).
 // Falls back to ZORA_API_KEY for backward compatibility.
@@ -94,6 +97,55 @@ interface ZoraCall {
   target: string;
   data: string;
   value: string;
+}
+
+interface ZoraPermit {
+  permit: {
+    details: {
+      token: string;
+      amount: string;
+      expiration: number;
+      nonce: number;
+    };
+    spender: string;
+    sigDeadline: string;
+  };
+  /** Placeholder string returned by Zora API — must be replaced with actual EIP-712 sig. */
+  signature: string;
+}
+
+interface ZoraQuoteResult {
+  call: ZoraCall;
+  permits: ZoraPermit[];
+}
+
+/**
+ * Injects a signed Permit2 signature into Zora API calldata.
+ *
+ * The Zora API returns sell calldata with a literal ASCII placeholder
+ * "REPLACE_WITH_PERMIT_SIGNATURE_1" where the 65-byte EIP-712 signature
+ * must be inserted.  The bytes field is ABI-encoded as:
+ *   - 32 bytes = length prefix (0x41 = 65)
+ *   - 65 bytes = signature
+ *   - 31 bytes = zero-padding to next 32-byte boundary
+ * Total span in the hex string: 256 chars (128 bytes).
+ */
+function injectPermitSignature(callDataHex: string, signature: `0x${string}`): string {
+  const PLACEHOLDER = "REPLACE_WITH_PERMIT_SIGNATURE_1";
+  const idx = callDataHex.indexOf(PLACEHOLDER);
+  if (idx === -1) {
+    throw new Error("injectPermitSignature: placeholder not found in calldata — API response format may have changed");
+  }
+  const sigHex = signature.slice(2); // 130 hex chars (65 bytes)
+  if (sigHex.length !== 130) {
+    throw new Error(`injectPermitSignature: unexpected signature length ${sigHex.length} (expected 130 hex chars)`);
+  }
+  // ABI-encoded bytes for 65-byte sig: 32-byte length + 65-byte data + 31-byte pad = 128 bytes = 256 hex chars
+  const lengthPrefix = "0000000000000000000000000000000000000000000000000000000000000041"; // 64 chars
+  const zeroPad = "0".repeat(62); // 31 bytes padding → 62 chars
+  const encodedSig = lengthPrefix + sigHex + zeroPad; // 256 chars total
+  // Replace the full 256-char slot starting at the placeholder position
+  return callDataHex.slice(0, idx) + encodedSig + callDataHex.slice(idx + 256);
 }
 
 /**
@@ -230,7 +282,7 @@ async function fetchZoraQuoteGeneric(params: {
   slippage: number; // fractional, e.g. 0.05
   sender: string;
   label?: string; // log label
-}): Promise<ZoraCall> {
+}): Promise<ZoraQuoteResult> {
   const { tokenIn, tokenOut, amountIn, slippage, sender, label = "Zora quote" } = params;
   const headers: Record<string, string> = { "Content-Type": "application/json" };
   const _apiKey = nextZoraKey();
@@ -269,7 +321,8 @@ async function fetchZoraQuoteGeneric(params: {
 
     const data = await res.json();
     if (!data.call) {
-      if (data.success === "false" || data.error) {
+      // Fix: API returns success as a boolean, not the string "false"
+      if (data.success === false || data.error) {
         // API returned 200 but with an error payload — treat as no-route
         throw new Error(`ZoraNoRoute: ${JSON.stringify(data).slice(0, 200)}`);
       }
@@ -281,8 +334,9 @@ async function fetchZoraQuoteGeneric(params: {
       throw new Error(`${label} returned no call: ${JSON.stringify(data).slice(0, 200)}`);
     }
 
-    logger.info({ attempt, target: data.call.target }, `${label} OK`);
-    return data.call as ZoraCall;
+    const permits: ZoraPermit[] = Array.isArray(data.permits) ? data.permits : [];
+    logger.info({ attempt, target: data.call.target, permitsCount: permits.length }, `${label} OK`);
+    return { call: data.call as ZoraCall, permits };
   }
 
   throw new Error(`${label} failed after 3 attempts`);
@@ -294,13 +348,17 @@ async function fetchZoraQuoteGeneric(params: {
  * pair against a creator coin rather than WETH directly.
  * Throws ZoraNoRoute error (message starts with "ZoraNoRoute:") if the Zora API
  * cannot find a route — the caller can then attempt a two-step sell.
+ *
+ * Returns both the calldata and the permits array. When permits are non-empty,
+ * the calldata contains the placeholder "REPLACE_WITH_PERMIT_SIGNATURE_1" that
+ * must be replaced with the signed Permit2 EIP-712 signature before submission.
  */
 async function fetchZoraSellQuote(params: {
   tokenAddress: string;
   tokenAmountWei: bigint;
   slippage: number; // fractional
   sender: string;
-}): Promise<ZoraCall> {
+}): Promise<ZoraQuoteResult> {
   return fetchZoraQuoteGeneric({
     tokenIn: { type: "erc20", address: params.tokenAddress.toLowerCase() },
     tokenOut: { type: "erc20", address: USDC_BASE.toLowerCase() },
@@ -520,6 +578,10 @@ async function fetchZoraPriceProbe(
 /**
  * Approve the Zora router + execute a sell transaction via Zora Quote API.
  * Records sell result in the trades table and broadcasts the update.
+ *
+ * The Zora API returns sell calldata with a Permit2 EIP-712 placeholder
+ * ("REPLACE_WITH_PERMIT_SIGNATURE_1") that must be signed and injected before
+ * the tx is submitted. This function handles that automatically.
  */
 export async function executeZoraSell(params: {
   tradeId: number;
@@ -546,17 +608,94 @@ export async function executeZoraSell(params: {
     args: [account.address],
   });
 
-  // ── Single-hop sell: token → USDC ─────────────────────────────────────────
-  const call = await fetchZoraSellQuote({
+  // ── Get sell quote (token → USDC) ─────────────────────────────────────────
+  const { call: rawCall, permits } = await fetchZoraSellQuote({
     tokenAddress,
     tokenAmountWei: tokenBalance,
     slippage,
     sender: account.address,
   });
 
+  // ── Handle Permit2 if the API returned permit data ────────────────────────
+  //
+  // The Zora API builds sell calldata using Permit2 (Uniswap's universal permit
+  // router). When permits are returned, `call.data` contains the ASCII placeholder
+  // "REPLACE_WITH_PERMIT_SIGNATURE_1" where the 65-byte EIP-712 signature must
+  // be injected. Approval must go to the Permit2 contract, not the router.
+  let call = rawCall;
+  let tokenInAddress: Address | null = tokenAddress; // null → skip approval inside executeZoraSwapTx
+
+  if (permits.length > 0) {
+    logger.info({ tradeId, permitsCount: permits.length }, "Signing Permit2 for Zora sell");
+
+    // Approve Permit2 contract to spend tokens (if not already sufficient)
+    const permit2Allowance = await publicClient.readContract({
+      address: tokenAddress,
+      abi: ERC20_ABI,
+      functionName: "allowance",
+      args: [account.address, PERMIT2_ADDRESS],
+    });
+    if (permit2Allowance < tokenBalance) {
+      logger.info({ tradeId, spender: PERMIT2_ADDRESS }, "Approving Permit2 contract for sell");
+      const approveTx = await walletClient.writeContract({
+        address: tokenAddress,
+        abi: ERC20_ABI,
+        functionName: "approve",
+        args: [PERMIT2_ADDRESS, maxUint256],
+        chain: base,
+        account,
+      });
+      await publicClient.waitForTransactionReceipt({ hash: approveTx, timeout: 60_000 });
+      logger.info({ tradeId, approveTx }, "Permit2 approval confirmed");
+    }
+
+    // Sign each permit and inject signature into calldata
+    let callData = rawCall.data;
+    for (const p of permits) {
+      const sig = await walletClient.signTypedData({
+        account,
+        domain: {
+          name: "Permit2",
+          chainId: base.id,
+          verifyingContract: PERMIT2_ADDRESS,
+        },
+        types: {
+          PermitDetails: [
+            { name: "token", type: "address" },
+            { name: "amount", type: "uint160" },
+            { name: "expiration", type: "uint48" },
+            { name: "nonce", type: "uint48" },
+          ],
+          PermitSingle: [
+            { name: "details", type: "PermitDetails" },
+            { name: "spender", type: "address" },
+            { name: "sigDeadline", type: "uint256" },
+          ],
+        },
+        primaryType: "PermitSingle",
+        message: {
+          details: {
+            token: p.permit.details.token as Address,
+            amount: BigInt(p.permit.details.amount),
+            expiration: p.permit.details.expiration,
+            nonce: p.permit.details.nonce,
+          },
+          spender: p.permit.spender as Address,
+          sigDeadline: BigInt(p.permit.sigDeadline),
+        },
+      });
+      callData = injectPermitSignature(callData, sig);
+      logger.info({ tradeId, sigLength: sig.length }, "Permit2 signature injected into calldata");
+    }
+
+    call = { ...rawCall, data: callData };
+    // Permit2 handles token authorization — skip direct router approval
+    tokenInAddress = null;
+  }
+
   const lastTxHash = await executeZoraSwapTx({
     call,
-    tokenInAddress: tokenAddress,
+    tokenInAddress,
     tokenInAmount: tokenBalance,
     maxGasGwei,
     publicClient,
@@ -589,7 +728,7 @@ export async function executeZoraSell(params: {
   );
 }
 
-// ── executeBuy ────────────────────────────────────────────────────────────
+// ── executeBuy ──────────────────────────────────────────────────────���─────
 
 export async function executeBuy(params: TradeParams): Promise<void> {
   const {
@@ -634,7 +773,7 @@ export async function executeBuy(params: TradeParams): Promise<void> {
 
     const buyAmountWei = parseEther(buyAmountEth);
 
-    // ── Step 1: Get quote from Zora API ───────────────────────────────────────
+    // ── Step 1: Get quote from Zora API ──────��────────────────────────────────
     const call = await fetchZoraQuote({
       tokenAddress,
       buyAmountWei,
