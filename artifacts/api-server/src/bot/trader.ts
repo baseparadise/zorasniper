@@ -96,6 +96,18 @@ interface ZoraCall {
   value: string;
 }
 
+/** Ensure a hex string has the 0x prefix — Zora API sometimes omits it. */
+function toHex(s: string): `0x${string}` {
+  const clean = s && s.startsWith("0x") ? s : `0x${s ?? ""}`;
+  return clean as `0x${string}`;
+}
+
+/** Safely parse a bigint from a string that may be null/undefined/empty. */
+function toBigIntSafe(s: string | null | undefined, fallback = 0n): bigint {
+  if (!s || s === "") return fallback;
+  try { return BigInt(s); } catch { return fallback; }
+}
+
 function getRpcUrl(): string {
   const url = process.env.ALCHEMY_RPC_URL;
   if (!url) throw new Error("ALCHEMY_RPC_URL is not set");
@@ -357,7 +369,7 @@ export async function executeZoraSell(params: {
     address: tokenAddress,
     abi: ERC20_ABI,
     functionName: "allowance",
-    args: [account.address, call.target as Address],
+    args: [account.address, toHex(call.target) as Address],
   });
 
   if (allowance < tokenBalance) {
@@ -366,7 +378,7 @@ export async function executeZoraSell(params: {
       address: tokenAddress,
       abi: ERC20_ABI,
       functionName: "approve",
-      args: [call.target as Address, maxUint256],
+      args: [toHex(call.target) as Address, maxUint256],
       chain: base,
       account,
     });
@@ -377,9 +389,9 @@ export async function executeZoraSell(params: {
   // ── Step 3: Simulate sell (warning-only — Zora router often reverts via eth_call) ──
   try {
     await publicClient.call({
-      to: call.target as Address,
-      data: call.data as `0x${string}`,
-      value: BigInt(call.value),
+      to: toHex(call.target) as Address,
+      data: toHex(call.data),
+      value: toBigIntSafe(call.value),
       account: account.address,
     });
     logger.info({ tradeId }, "Sell simulation passed");
@@ -398,9 +410,9 @@ export async function executeZoraSell(params: {
     const [fees, gas] = await Promise.all([
       publicClient.estimateFeesPerGas(),
       publicClient.estimateGas({
-        to: call.target as Address,
-        data: call.data as `0x${string}`,
-        value: BigInt(call.value),
+        to: toHex(call.target) as Address,
+        data: toHex(call.data),
+        value: toBigIntSafe(call.value),
         account: account.address,
       }),
     ]);
@@ -428,9 +440,9 @@ export async function executeZoraSell(params: {
 
   // ── Step 6: Send sell tx ──────────────────────────────────────────────────
   const txHash = await walletClient.sendTransaction({
-    to: call.target as Address,
-    data: call.data as `0x${string}`,
-    value: BigInt(call.value),
+    to: toHex(call.target) as Address,
+    data: toHex(call.data),
+    value: toBigIntSafe(call.value),
     chain: base,
     account,
     gas: gasLimit,
@@ -521,13 +533,13 @@ export async function executeBuy(params: TradeParams): Promise<void> {
       sender: account.address,
     });
 
-    const value = BigInt(call.value);
+    const value = toBigIntSafe(call.value);
 
     // ── Step 2: Simulate — revert early before spending gas ───────────────────
     try {
       await publicClient.call({
-        to: call.target as Address,
-        data: call.data as `0x${string}`,
+        to: toHex(call.target) as Address,
+        data: toHex(call.data),
         value,
         account: account.address,
       });
@@ -542,8 +554,8 @@ export async function executeBuy(params: TradeParams): Promise<void> {
     const [feeEstimate, estimatedGas] = await Promise.all([
       publicClient.estimateFeesPerGas(),
       publicClient.estimateGas({
-        to: call.target as Address,
-        data: call.data as `0x${string}`,
+        to: toHex(call.target) as Address,
+        data: toHex(call.data),
         value,
         account: account.address,
       }),
@@ -564,8 +576,8 @@ export async function executeBuy(params: TradeParams): Promise<void> {
 
     // ── Step 4: Send transaction ───────────────────────────────────────────────
     const txHash = await walletClient.sendTransaction({
-      to: call.target as Address,
-      data: call.data as `0x${string}`,
+      to: toHex(call.target) as Address,
+      data: toHex(call.data),
       value,
       chain: base,
       account,
