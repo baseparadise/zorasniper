@@ -143,12 +143,16 @@ interface ZoraQuoteResult {
  * Injects a signed Permit2 signature into Zora API calldata.
  *
  * The Zora API returns sell calldata with a literal ASCII placeholder
- * "REPLACE_WITH_PERMIT_SIGNATURE_1" where the 65-byte EIP-712 signature
- * must be inserted. The bytes field is ABI-encoded as:
- *   - 32 bytes = length prefix (0x41 = 65)
- *   - 65 bytes = signature
- *   - 31 bytes = zero-padding to next 32-byte boundary
- * Total span in the hex string: 256 chars (128 bytes).
+ * "REPLACE_WITH_PERMIT_SIGNATURE_1" followed by zero-padding. The placeholder
+ * + trailing zeros together occupy the space for the full ABI-encoded signature
+ * slot. We must skip ALL of them before appending the rest of the calldata —
+ * otherwise the extra zeros corrupt the ABI encoding and cause the tx to revert.
+ *
+ * Full ABI slot for a 65-byte bytes value:
+ *   32 bytes = length (0x41 = 65) → 64 hex chars
+ *   65 bytes = signature data      → 130 hex chars
+ *   31 bytes = zero-padding        → 62 hex chars
+ *   Total: 128 bytes = 256 hex chars
  */
 function injectPermitSignature(callDataHex: string, signature: `0x${string}`): string {
   const PLACEHOLDER = "REPLACE_WITH_PERMIT_SIGNATURE_1";
@@ -160,12 +164,17 @@ function injectPermitSignature(callDataHex: string, signature: `0x${string}`): s
   if (sigHex.length !== 130) {
     throw new Error(`injectPermitSignature: unexpected signature length ${sigHex.length} (expected 130 hex chars)`);
   }
-  // ABI-encoded bytes for 65-byte sig: 32-byte length + 65-byte data + 31-byte pad = 128 bytes = 256 hex chars
   const lengthPrefix = "0000000000000000000000000000000000000000000000000000000000000041"; // 64 chars
   const zeroPad = "0".repeat(62); // 31 bytes padding → 62 chars
   const encodedSig = lengthPrefix + sigHex + zeroPad; // 256 chars total
-  // Replace the full 256-char slot starting at the placeholder position
-  return callDataHex.slice(0, idx) + encodedSig + callDataHex.slice(idx + PLACEHOLDER.length);
+
+  // Skip past the placeholder AND all zero chars that follow it.
+  let slotEnd = idx + PLACEHOLDER.length;
+  while (slotEnd < callDataHex.length && callDataHex[slotEnd] === "0") {
+    slotEnd++;
+  }
+
+  return callDataHex.slice(0, idx) + encodedSig + callDataHex.slice(slotEnd);
 }
 
 /**
@@ -1058,8 +1067,17 @@ async function runZoraSell(
       }
       throw new Error(`Zora sell quote returned no call: ${JSON.stringify(data).slice(0, 200)}`);
     }
+    // Guard: amountOut "0" means the route has no liquidity (e.g. token pools against a
+    // creator coin rather than WETH/USDC). Throw so the caller falls back to Li.Fi.
+    const amountOut: string | null = data.quote?.amountOut ?? null;
+    if (amountOut === "0") {
+      logger.warn({ tradeId, amountOut }, "Zora sell quote: amountOut is 0 — no liquidity, falling back");
+      throw new Error("ZoraNoRoute: amountOut is 0 (pool has no liquidity for this route)");
+    }
+
     rawCall = data.call as ZoraCall;
     permits = Array.isArray(data.permits) ? data.permits : [];
+    logger.info({ tradeId, amountOut }, "Zora sell quote amountOut ok");
     break;
   }
 

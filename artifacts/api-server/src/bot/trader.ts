@@ -143,12 +143,30 @@ function injectPermitSignature(callDataHex: string, signature: `0x${string}`): s
   if (sigHex.length !== 130) {
     throw new Error(`injectPermitSignature: unexpected signature length ${sigHex.length} (expected 130 hex chars)`);
   }
-  // ABI-encoded bytes for 65-byte sig: 32-byte length + 65-byte data + 31-byte pad = 128 bytes = 256 hex chars
+
+  // The Zora API embeds the placeholder followed by zero-padding into the calldata.
+  // The placeholder text (31 chars) + trailing zeros together occupy the space that the
+  // full ABI-encoded signature slot should fill. We must skip ALL of them before
+  // appending the rest of the calldata — otherwise the extra zeros corrupt the ABI
+  // encoding and cause the tx to revert.
+  //
+  // Full ABI slot for a 65-byte bytes value:
+  //   32 bytes = length (0x41 = 65)  → 64 hex chars
+  //   65 bytes = signature data       → 130 hex chars
+  //   31 bytes = zero-padding         → 62 hex chars
+  //   Total: 128 bytes = 256 hex chars
   const lengthPrefix = "0000000000000000000000000000000000000000000000000000000000000041"; // 64 chars
   const zeroPad = "0".repeat(62); // 31 bytes padding → 62 chars
   const encodedSig = lengthPrefix + sigHex + zeroPad; // 256 chars total
-  // Replace the full 256-char slot starting at the placeholder position
-  return callDataHex.slice(0, idx) + encodedSig + callDataHex.slice(idx + PLACEHOLDER.length);
+
+  // Skip past the placeholder AND all zero chars that follow it (they are the
+  // compressed zero-filled remainder of the slot in the API response).
+  let slotEnd = idx + PLACEHOLDER.length;
+  while (slotEnd < callDataHex.length && callDataHex[slotEnd] === "0") {
+    slotEnd++;
+  }
+
+  return callDataHex.slice(0, idx) + encodedSig + callDataHex.slice(slotEnd);
 }
 
 /**
@@ -639,8 +657,8 @@ async function fetchZoraQuoteGeneric(params: {
 
     const data = await res.json();
     if (!data.call) {
-      // Fix: API returns success as a boolean, not the string "false"
-      if (data.success === false || data.error) {
+      // API may return success as a string "true"/"false" or as a boolean.
+      if (data.success === false || data.success === "false" || data.error) {
         // API returned 200 but with an error payload — treat as no-route
         throw new Error(`ZoraNoRoute: ${JSON.stringify(data).slice(0, 200)}`);
       }
@@ -652,8 +670,17 @@ async function fetchZoraQuoteGeneric(params: {
       throw new Error(`${label} returned no call: ${JSON.stringify(data).slice(0, 200)}`);
     }
 
+    // Guard: if amountOut is "0" the route exists but has no liquidity (common for
+    // tokens whose pool pairs against a creator coin rather than WETH/USDC).
+    // Throw ZoraNoRoute so the caller falls back to Uniswap V4 or Li.Fi.
+    const amountOut: string | null = data.quote?.amountOut ?? null;
+    if (amountOut === "0") {
+      logger.warn({ attempt, label, amountOut }, `${label}: amountOut is 0 — no liquidity on this route, treating as ZoraNoRoute`);
+      throw new Error(`ZoraNoRoute: amountOut is 0 (pool has no liquidity for this route)`);
+    }
+
     const permits: ZoraPermit[] = Array.isArray(data.permits) ? data.permits : [];
-    logger.info({ attempt, target: data.call.target, permitsCount: permits.length }, `${label} OK`);
+    logger.info({ attempt, target: data.call.target, permitsCount: permits.length, amountOut }, `${label} OK`);
     return { call: data.call as ZoraCall, permits };
   }
 
