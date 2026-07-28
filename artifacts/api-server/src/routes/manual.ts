@@ -1117,7 +1117,6 @@ router.post("/manual/simulate", async (req, res): Promise<void> => {
     );
 
     const tokensNum = parseFloat(formatUnits(BigInt(quote.estimate.toAmount), 18));
-    const minTokensNum = parseFloat(formatUnits(BigInt(quote.estimate.toAmountMin), 18));
     const ethNum = parseFloat(buyAmountEth);
     const entryPrice = tokensNum > 0 ? (ethNum / tokensNum).toFixed(18) : "0";
 
