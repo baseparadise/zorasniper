@@ -745,7 +745,9 @@ export async function executeBuy(params: TradeParams): Promise<void> {
     }
 
     // Calculate entry price: ETH spent ÷ tokens received
-    const tokensNum = tokenAmount ? parseFloat(formatUnits(BigInt(tokenAmount), 18)) : 0;
+    // tokenAmount is already a decimal string from formatUnits (e.g. "1.0"), so
+    // parse it directly — BigInt() cannot handle decimal strings and would throw.
+    const tokensNum = tokenAmount ? parseFloat(tokenAmount) : 0;
     const ethNum = parseFloat(buyAmountEth);
     const entryPriceEth = tokensNum > 0 ? (ethNum / tokensNum).toFixed(18) : null;
 
