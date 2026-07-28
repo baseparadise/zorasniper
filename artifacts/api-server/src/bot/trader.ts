@@ -214,8 +214,9 @@ async function fetchZoraQuote(params: {
   throw new Error("Zora quote failed after 3 attempts — pool not ready or token invalid");
 }
 
-/** WETH address on Base — used to identify ETH-paired pools. */
-const WETH_BASE = "0x4200000000000000000000000000000000000006";
+/** USDC address on Base — primary sell currency (more reliable routing than ETH for Zora content coins). */
+const USDC_BASE = "0x833589fCD6eDb6E08f4c7C32D4f71b54bdA02913" as Address;
+const USDC_DECIMALS = 6;
 
 /**
  * Generic Zora Quote API caller.
@@ -288,9 +289,11 @@ async function fetchZoraQuoteGeneric(params: {
 }
 
 /**
- * Fetch a SELL quote from Zora Quote API (erc20 → ETH).
+ * Fetch a SELL quote from Zora Quote API (erc20 → USDC).
+ * USDC routing is more reliable than ETH for Zora content coins whose pools
+ * pair against a creator coin rather than WETH directly.
  * Throws ZoraNoRoute error (message starts with "ZoraNoRoute:") if the Zora API
- * cannot find a direct route — the caller can then attempt a two-step sell.
+ * cannot find a route — the caller can then attempt a two-step sell.
  */
 async function fetchZoraSellQuote(params: {
   tokenAddress: string;
@@ -300,41 +303,12 @@ async function fetchZoraSellQuote(params: {
 }): Promise<ZoraCall> {
   return fetchZoraQuoteGeneric({
     tokenIn: { type: "erc20", address: params.tokenAddress.toLowerCase() },
-    tokenOut: { type: "eth" },
+    tokenOut: { type: "erc20", address: USDC_BASE.toLowerCase() },
     amountIn: params.tokenAmountWei,
     slippage: params.slippage,
     sender: params.sender,
-    label: "Zora sell quote",
+    label: "Zora sell quote (→USDC)",
   });
-}
-
-/**
- * Fetch the pool currency for a Zora coin via the /coin endpoint.
- * Content coins pair against a creator coin; creator coins pair against the ZORA token.
- * Returns null if the endpoint fails or the coin is not found.
- */
-async function fetchZoraPoolCurrency(tokenAddress: string): Promise<string | null> {
-  try {
-    const headers: Record<string, string> = {};
-    const _apiKey = nextZoraKey();
-    if (_apiKey) headers["x-api-key"] = _apiKey;
-
-    const res = await fetch(
-      `${ZORA_QUOTE_API}/coin?chainId=${base.id}&address=${tokenAddress.toLowerCase()}`,
-      { headers },
-    );
-    if (!res.ok) return null;
-
-    const data = await res.json();
-    const addr: string | undefined = data?.zora20Token?.poolCurrencyToken?.address;
-    if (!addr) return null;
-
-    logger.info({ tokenAddress, poolCurrency: addr }, "Zora pool currency detected");
-    return addr.toLowerCase();
-  } catch (err) {
-    logger.warn({ err, tokenAddress }, "fetchZoraPoolCurrency failed");
-    return null;
-  }
 }
 
 /**
@@ -523,18 +497,6 @@ async function fetchZoraPriceProbe(
 /**
  * Approve the Zora router + execute a sell transaction via Zora Quote API.
  * Records sell result in the trades table and broadcasts the update.
- *
- * Two-step sell fallback for creator-coin-paired tokens:
- *   Some Zora content coins (coinType: CONTENT) pool against a creator coin
- *   rather than ETH/WETH directly. The Zora /quote endpoint returns
- *   "SwapError: Failed to get quote" when asked to sell such a token straight
- *   to ETH, because there is no single-hop ETH pool.
- *
- *   On that error we:
- *     1. Fetch the pool currency from /coin (e.g. batnater creator coin).
- *     2. Sell: token → poolCurrency  (hop 1, direct pool — always works).
- *     3. Sell: poolCurrency → ETH    (hop 2, creator coin has an ETH pool).
- *   ETH balance delta across both hops is used for PnL calculation.
  */
 export async function executeZoraSell(params: {
   tradeId: number;
@@ -553,142 +515,54 @@ export async function executeZoraSell(params: {
 
   const swapCtx = { tradeId, reason };
 
-  // ── Snapshot ETH balance before any sell ─────────────────────────────────
-  const ethBefore = await publicClient.getBalance({ address: account.address });
+  // ── Snapshot USDC balance before sell ────────────────────────────────────
+  const usdcBefore = await publicClient.readContract({
+    address: USDC_BASE,
+    abi: ERC20_ABI,
+    functionName: "balanceOf",
+    args: [account.address],
+  });
 
-  // ── Attempt 1: direct sell token → ETH ───────────────────────────────────
-  let directFailed = false;
-  let lastTxHash: `0x${string}` | null = null;
-  try {
-    const call = await fetchZoraSellQuote({
-      tokenAddress,
-      tokenAmountWei: tokenBalance,
-      slippage,
-      sender: account.address,
-    });
+  // ── Single-hop sell: token → USDC ─────────────────────────────────────────
+  const call = await fetchZoraSellQuote({
+    tokenAddress,
+    tokenAmountWei: tokenBalance,
+    slippage,
+    sender: account.address,
+  });
 
-    lastTxHash = await executeZoraSwapTx({
-      call,
-      tokenInAddress: tokenAddress,
-      tokenInAmount: tokenBalance,
-      maxGasGwei,
-      publicClient,
-      walletClient,
-      account,
-      logCtx: { ...swapCtx, step: "direct-sell" },
-    });
-  } catch (directErr) {
-    const msg = directErr instanceof Error ? directErr.message : String(directErr);
-    if (!msg.startsWith("ZoraNoRoute:")) {
-      // Genuine on-chain or network failure — surface immediately
-      throw directErr;
-    }
-    // No direct ETH route → try two-step sell
-    logger.warn(
-      { tradeId, tokenAddress, msg: msg.slice(0, 120) },
-      "Direct Zora sell has no route — checking pool currency for two-step sell",
-    );
-    directFailed = true;
-  }
+  const lastTxHash = await executeZoraSwapTx({
+    call,
+    tokenInAddress: tokenAddress,
+    tokenInAmount: tokenBalance,
+    maxGasGwei,
+    publicClient,
+    walletClient,
+    account,
+    logCtx: { ...swapCtx, step: "sell-to-usdc" },
+  });
 
-  // ── Attempt 2: two-step sell for creator-coin-paired tokens ──────────────
-  if (directFailed) {
-    const poolCurrency = await fetchZoraPoolCurrency(tokenAddress);
-
-    if (!poolCurrency || poolCurrency === WETH_BASE.toLowerCase()) {
-      throw new Error(
-        `Zora sell failed: no direct ETH route and no usable pool currency found for ${tokenAddress}`,
-      );
-    }
-
-    logger.info(
-      { tradeId, tokenAddress, poolCurrency },
-      "Two-step sell: token → poolCurrency → ETH",
-    );
-
-    // ── Hop 1: token → creator/pool currency ─────────────────────────────
-    const hop1Call = await fetchZoraQuoteGeneric({
-      tokenIn: { type: "erc20", address: tokenAddress.toLowerCase() },
-      tokenOut: { type: "erc20", address: poolCurrency },
-      amountIn: tokenBalance,
-      slippage,
-      sender: account.address,
-      label: "Zora two-step sell hop1 (token→poolCurrency)",
-    });
-
-    await executeZoraSwapTx({
-      call: hop1Call,
-      tokenInAddress: tokenAddress,
-      tokenInAmount: tokenBalance,
-      maxGasGwei,
-      publicClient,
-      walletClient,
-      account,
-      logCtx: { ...swapCtx, step: "two-step-hop1" },
-    });
-    // hop1 txHash captured for logging; final sellTxHash will be set to hop2
-
-    // ── Hop 2: creator/pool currency → ETH ───────────────────────────────
-    // Read the actual amount received from hop 1 (don't assume a fixed amount)
-    const poolCurrencyAddr = poolCurrency as Address;
-    const poolCurrencyBalance = await publicClient.readContract({
-      address: poolCurrencyAddr,
-      abi: ERC20_ABI,
-      functionName: "balanceOf",
-      args: [account.address],
-    });
-
-    if (poolCurrencyBalance === 0n) {
-      throw new Error(
-        `Two-step sell hop 1 succeeded but pool currency balance is 0 — cannot execute hop 2`,
-      );
-    }
-
-    logger.info(
-      { tradeId, poolCurrency, poolCurrencyBalance: poolCurrencyBalance.toString() },
-      "Two-step sell hop 1 confirmed — executing hop 2 (poolCurrency → ETH)",
-    );
-
-    const hop2Call = await fetchZoraSellQuote({
-      tokenAddress: poolCurrency,
-      tokenAmountWei: poolCurrencyBalance,
-      slippage,
-      sender: account.address,
-    });
-
-    lastTxHash = await executeZoraSwapTx({
-      call: hop2Call,
-      tokenInAddress: poolCurrencyAddr,
-      tokenInAmount: poolCurrencyBalance,
-      maxGasGwei,
-      publicClient,
-      walletClient,
-      account,
-      logCtx: { ...swapCtx, step: "two-step-hop2" },
-    });
-  }
-
-  // ── Calculate ETH received (net of gas across all hops) ───────────────────
-  const ethAfter = await publicClient.getBalance({ address: account.address });
-  // ethAfter - ethBefore already accounts for all gas spent across both hops
-  const ethReceivedNet = ethAfter > ethBefore ? ethAfter - ethBefore : 0n;
-  const sellAmountEth = formatEther(ethReceivedNet);
-
-  // P&L vs original buy amount
-  const [tradeRow] = await db.select().from(tradesTable).where(eq(tradesTable.id, tradeId));
-  const buyAmount = parseFloat(tradeRow?.buyAmountEth ?? "0");
-  const pnlEth = (parseFloat(sellAmountEth) - buyAmount).toFixed(8);
+  // ── Calculate USDC received ───────────────────────────────────────────────
+  const usdcAfter = await publicClient.readContract({
+    address: USDC_BASE,
+    abi: ERC20_ABI,
+    functionName: "balanceOf",
+    args: [account.address],
+  });
+  const usdcReceived = usdcAfter > usdcBefore ? usdcAfter - usdcBefore : 0n;
+  // sellAmountEth field stores USDC received (6 decimals); pnlEth stores same
+  const sellAmountUsdc = formatUnits(usdcReceived, USDC_DECIMALS);
 
   const [updated] = await db
     .update(tradesTable)
-    .set({ status: "sold", sellTxHash: lastTxHash, sellAmountEth, pnlEth })
+    .set({ status: "sold", sellTxHash: lastTxHash, sellAmountEth: sellAmountUsdc, pnlEth: sellAmountUsdc })
     .where(eq(tradesTable.id, tradeId))
     .returning();
 
   broadcast("trade", updated);
   logger.info(
-    { tradeId, sellAmountEth, pnlEth, reason, twoStep: directFailed },
-    "Sniper sell confirmed via Zora API",
+    { tradeId, sellAmountUsdc, reason },
+    "Sniper sell confirmed via Zora API (token → USDC)",
   );
 }
 
