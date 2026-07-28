@@ -454,14 +454,8 @@ async function fetchZoraPriceProbe(
 
     if (res.ok) {
       const data = await res.json();
-      // Zora API v2 returns amountOut inside the `quote` sub-object
-      const amountOutStr: string | undefined =
-        data.quote?.amountOut ??
-        data.amountOut ??
-        data.result?.amountOut ??
-        data.swapResult?.amountOut ??
-        data.estimate?.toAmount ??
-        data.expectedOutput;
+      // Zora API returns amountOut inside the `quote` sub-object
+      const amountOutStr: string | undefined = data.quote?.amountOut;
 
       if (amountOutStr) {
         const tokens = parseFloat(formatUnits(BigInt(amountOutStr), 18));
@@ -481,12 +475,9 @@ async function fetchZoraPriceProbe(
     );
     if (coinRes.ok) {
       const coinData = await coinRes.json();
-      // Zora API v2: price lives at zora20Token.tokenPrice.priceInUsdc
+      // Zora API: price lives at zora20Token.tokenPrice.priceInUsdc
       const priceInUsdc: string | undefined =
-        coinData?.zora20Token?.tokenPrice?.priceInUsdc ??
-        coinData.priceEth ??           // legacy fallback
-        coinData.currentPriceEth ??
-        coinData.price;
+        coinData?.zora20Token?.tokenPrice?.priceInUsdc;
 
       if (priceInUsdc) {
         const tokenPriceUsdc = parseFloat(priceInUsdc);
@@ -508,7 +499,7 @@ async function fetchZoraPriceProbe(
           if (ethUsdcRes.ok) {
             const ethUsdcData = await ethUsdcRes.json();
             const usdcPerEthStr: string | undefined =
-              ethUsdcData.quote?.amountOut ?? ethUsdcData.amountOut;
+              ethUsdcData.quote?.amountOut;
             if (usdcPerEthStr) {
               const usdcPerEth = parseFloat(formatUnits(BigInt(usdcPerEthStr), USDC_DECIMALS));
               if (usdcPerEth > 0) {
