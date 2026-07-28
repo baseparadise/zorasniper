@@ -733,68 +733,81 @@ async function monitorTpSl(
 
   logger.info({ tradeId, entryPriceEth, tpPrice, slPrice }, "Starting TP/SL monitor (Zora → Li.Fi)");
 
-  const INTERVAL_MS = 15_000;
-  const MAX_DURATION_MS = 24 * 60 * 60 * 1000;
+  const POLL_INTERVAL_MS = 15_000;
   const MAX_SELL_ATTEMPTS = 3;
-  const startAt = Date.now();
   let sellAttempts = 0;
+  let active = true;
 
-  while (Date.now() - startAt < MAX_DURATION_MS) {
-    await new Promise(r => setTimeout(r, INTERVAL_MS));
-
-    const [trade] = await db.select().from(tradesTable).where(eq(tradesTable.id, tradeId));
-    if (!trade || !["confirmed"].includes(trade.status)) break;
-
-    // ── Price probe: Zora first, Li.Fi fallback ──────────────────────────
-    let currentPrice: number | null = null;
-
-    // 1. Try Zora price probe (works for Zora Coins, new or established)
-    const zoraPrice = await fetchZoraPriceProbe(tokenAddress, probeAccount);
-    if (zoraPrice !== null) {
-      currentPrice = zoraPrice;
-    } else {
-      // 2. Li.Fi fallback probe (for tokens bought via Li.Fi)
-      try {
-        const probeQuote = await getLiFiQuote(
-          ETH_ADDRESS,
-          tokenAddress,
-          parseEther(PROBE_AMOUNT_ETH),
-          probeAccount,
-          5,
-        );
-        const probeTokens = parseFloat(formatUnits(BigInt(probeQuote.estimate.toAmount), 18));
-        if (probeTokens > 0) {
-          currentPrice = parseFloat(PROBE_AMOUNT_ETH) / probeTokens;
-        }
-      } catch {
-        // Both APIs unavailable — skip this cycle
-      }
-    }
-
-    if (currentPrice === null) continue;
-
-    const shouldTp = tpPrice !== null && currentPrice >= tpPrice;
-    const shouldSl = slPrice !== null && currentPrice <= slPrice;
-
-    if (!shouldTp && !shouldSl) continue;
-
-    const reason = shouldTp ? "take_profit" : "stop_loss";
-    logger.info({ tradeId, reason, currentPrice, tpPrice, slPrice }, "TP/SL triggered, executing sell");
+  while (active) {
+    await new Promise(r => setTimeout(r, POLL_INTERVAL_MS));
 
     try {
-      let probeAcct: ReturnType<typeof privateKeyToAccount>;
-      try { probeAcct = privateKeyToAccount(getWalletKey()); } catch { break; }
+      // Bail if trade was already closed externally (manual sell, etc.)
+      const [trade] = await db
+        .select({ status: tradesTable.status })
+        .from(tradesTable)
+        .where(eq(tradesTable.id, tradeId));
+
+      if (!trade || trade.status !== "confirmed") {
+        logger.info({ tradeId, status: trade?.status }, "TP/SL monitor: trade no longer active — exiting");
+        return;
+      }
+
+      // ── Price probe: Zora first, Li.Fi fallback ──────────────────────────
+      let currentPrice: number | null = null;
+
+      // 1. Try Zora price probe (works for Zora Coins, new or established)
+      const zoraPrice = await fetchZoraPriceProbe(tokenAddress, probeAccount);
+      if (zoraPrice !== null) {
+        currentPrice = zoraPrice;
+      } else {
+        // 2. Li.Fi fallback probe (for tokens bought via Li.Fi)
+        try {
+          const probeQuote = await getLiFiQuote(
+            ETH_ADDRESS,
+            tokenAddress,
+            parseEther(PROBE_AMOUNT_ETH),
+            probeAccount,
+            5,
+          );
+          const probeTokens = parseFloat(formatUnits(BigInt(probeQuote.estimate.toAmount), 18));
+          if (probeTokens > 0) {
+            currentPrice = parseFloat(PROBE_AMOUNT_ETH) / probeTokens;
+          }
+        } catch {
+          // Both APIs unavailable — skip this cycle
+        }
+      }
+
+      if (currentPrice === null) continue;
+
+      logger.debug({ tradeId, currentPrice, tpPrice, slPrice }, "TP/SL price check");
+
+      const shouldTp = tpPrice !== null && currentPrice >= tpPrice;
+      const shouldSl = slPrice !== null && currentPrice <= slPrice;
+
+      if (!shouldTp && !shouldSl) continue;
+
+      const reason = shouldTp ? "take_profit" : "stop_loss";
+      logger.info({ tradeId, reason, currentPrice, tpPrice, slPrice }, "TP/SL triggered, executing sell");
+
+      // Stop the loop unless the sell fails and we need to retry
+      active = false;
 
       const rawBal = await publicClient.readContract({
         address: tokenAddress,
         abi: ERC20_ABI,
         functionName: "balanceOf",
-        args: [probeAcct.address],
+        args: [probeAccount],
       });
 
       if (rawBal === 0n) {
         logger.warn({ tradeId }, "No token balance to sell — position already closed externally");
-        break;
+        await db
+          .update(tradesTable)
+          .set({ status: "sold", failReason: "Balance zero at TP/SL trigger" })
+          .where(eq(tradesTable.id, tradeId));
+        return;
       }
 
       // ── Try Zora first, fallback to Li.Fi ──────────────────────────────
@@ -807,16 +820,21 @@ async function monitorTpSl(
         await runLiFiSell(tradeId, tokenAddress, rawBal, buyAmountEth, 10);
         logger.info({ tradeId, reason }, "TP/SL sell confirmed via Li.Fi");
       }
-      break;
     } catch (err) {
-      sellAttempts++;
-      logger.error({ err, tradeId, sellAttempts, maxAttempts: MAX_SELL_ATTEMPTS }, "TP/SL sell failed");
-
-      if (sellAttempts >= MAX_SELL_ATTEMPTS) {
-        logger.error({ tradeId }, "Max sell attempts reached — monitor exiting");
-        break;
+      // If this was a sell attempt that failed, count it and maybe retry
+      if (!active) {
+        sellAttempts++;
+        logger.error({ err, tradeId, sellAttempts, maxAttempts: MAX_SELL_ATTEMPTS }, "TP/SL sell failed");
+        if (sellAttempts >= MAX_SELL_ATTEMPTS) {
+          logger.error({ tradeId }, "Max sell attempts reached — monitor exiting");
+          return;
+        }
+        // Re-activate to retry sell on next poll cycle
+        active = true;
+      } else {
+        // Error in price probe or DB query — log and continue polling
+        logger.error({ err, tradeId }, "TP/SL monitor cycle error");
       }
-      await new Promise(r => setTimeout(r, INTERVAL_MS * 2));
     }
   }
 }
