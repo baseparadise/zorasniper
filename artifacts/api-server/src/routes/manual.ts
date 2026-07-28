@@ -141,16 +141,17 @@ interface ZoraQuoteResult {
  * Injects a signed Permit2 signature into Zora API calldata.
  *
  * The Zora API returns sell calldata with a literal ASCII placeholder
- * "REPLACE_WITH_PERMIT_SIGNATURE_1" followed by zero-padding. The placeholder
- * + trailing zeros together occupy the space for the full ABI-encoded signature
- * slot. We must skip ALL of them before appending the rest of the calldata —
- * otherwise the extra zeros corrupt the ABI encoding and cause the tx to revert.
- *
- * Full ABI slot for a 65-byte bytes value:
- *   32 bytes = length (0x41 = 65) → 64 hex chars
- *   65 bytes = signature data      → 130 hex chars
- *   31 bytes = zero-padding        → 62 hex chars
+ * "REPLACE_WITH_PERMIT_SIGNATURE_1" where the 65-byte EIP-712 signature
+ * must be inserted.  The slot is always exactly 128 bytes (256 hex chars):
+ *   - 32 bytes = inner length prefix (0x41 = 65) — ABI-encodes the bytes value
+ *   - 65 bytes = signature data
+ *   - 31 bytes = zero-padding to next 32-byte boundary
  *   Total: 128 bytes = 256 hex chars
+ *
+ * IMPORTANT: the 256-char slot is NOT all zeros after the placeholder.
+ * Words 3–4 of the slot may contain non-zero bytes (e.g. 0x60 offset and
+ * token address from other encoding layers).  The slot must be replaced in
+ * full using a fixed offset, NOT with a while-zero-skip loop.
  */
 function injectPermitSignature(callDataHex: string, signature: `0x${string}`): string {
   const PLACEHOLDER = "REPLACE_WITH_PERMIT_SIGNATURE_1";
@@ -166,10 +167,19 @@ function injectPermitSignature(callDataHex: string, signature: `0x${string}`): s
   const zeroPad = "0".repeat(62); // 31 bytes padding → 62 chars
   const encodedSig = lengthPrefix + sigHex + zeroPad; // 256 chars total
 
-  // Skip past the placeholder AND all zero chars that follow it.
-  let slotEnd = idx + PLACEHOLDER.length;
-  while (slotEnd < callDataHex.length && callDataHex[slotEnd] === "0") {
-    slotEnd++;
+  // The slot occupies exactly SLOT_CHARS = 256 hex chars starting at idx.
+  // We must NOT use a while-zero-skip loop: the last two 32-byte words of the
+  // slot contain non-zero bytes (0x60 offset pointer and the token address from
+  // the inner encoding), so a zero-skip would stop far too early and GROW the
+  // calldata by 33 bytes — corrupting every ABI offset that follows.
+  const SLOT_CHARS = 256;
+  const slotEnd = idx + SLOT_CHARS;
+
+  if (slotEnd > callDataHex.length) {
+    throw new Error(
+      `injectPermitSignature: slot extends beyond calldata end ` +
+      `(idx=${idx}, slotEnd=${slotEnd}, len=${callDataHex.length})`,
+    );
   }
 
   return callDataHex.slice(0, idx) + encodedSig + callDataHex.slice(slotEnd);
@@ -221,7 +231,8 @@ async function fetchZoraQuote(params: {
       // kicks in without a ~10 s delay.
       const isPoolNotReady =
         text.includes("Cannot read properties of null") ||
-        text.includes("UNKNOWN");
+        text.includes("UNKNOWN") ||
+        res.status === 400;
 
       if (isPoolNotReady && attempt < 3) {
         logger.warn(
@@ -389,6 +400,22 @@ async function executeViaZora(
     maxGasGwei = config.maxGasGwei;
   } catch { /* proceed with default */ }
 
+  // ── Step 0: Snapshot token balance before buy ─────────────────────────
+  // Read current state (no blockNumber) — works on any node, no archive needed.
+  // Historical blockNumber-1n query (old approach) required archive access and
+  // often threw because the block wasn't propagated yet at query time.
+  let balBeforeBuy = 0n;
+  try {
+    balBeforeBuy = await publicClient.readContract({
+      address: tokenAddress,
+      abi: ERC20_ABI,
+      functionName: "balanceOf",
+      args: [account.address],
+    });
+  } catch {
+    // If pre-balance read fails (e.g. token not yet deployed), keep 0n
+  }
+
   // ── Simulate — abort early before spending gas ──────────────────────────
   try {
     await publicClient.call({
@@ -456,33 +483,27 @@ async function executeViaZora(
   const receipt = await publicClient.waitForTransactionReceipt({ hash: txHash, timeout: 60_000 });
   const gasUsedEth = formatEther(receipt.gasUsed * (receipt.effectiveGasPrice ?? maxFeePerGas));
 
-  // ── Measure tokens received via balanceOf diff (block-level) ───────────
-  // Same approach as sniper: compare balance at (blockNumber - 1) vs blockNumber
+  // ── Measure tokens received via balanceOf diff ─────────────────────────
+  // balBeforeBuy was snapshotted before the tx was sent (see Step 0).
+  // We read balAfter at the confirmed block — reliable on any node (no archive needed).
   let tokenAmount = "";
   try {
-    const [balBefore, balAfter] = await Promise.all([
-      publicClient.readContract({
-        address: tokenAddress,
-        abi: ERC20_ABI,
-        functionName: "balanceOf",
-        args: [account.address],
-        blockNumber: receipt.blockNumber - 1n,
-      }),
-      publicClient.readContract({
-        address: tokenAddress,
-        abi: ERC20_ABI,
-        functionName: "balanceOf",
-        args: [account.address],
-        blockNumber: receipt.blockNumber,
-      }),
-    ]);
-    const received = balAfter - balBefore;
+    const balAfter = await publicClient.readContract({
+      address: tokenAddress,
+      abi: ERC20_ABI,
+      functionName: "balanceOf",
+      args: [account.address],
+      blockNumber: receipt.blockNumber,
+    });
+    const received = balAfter > balBeforeBuy ? balAfter - balBeforeBuy : 0n;
     if (received > 0n) {
       tokenAmount = formatUnits(received, 18);
       logger.info({ tradeId, received: received.toString(), tokenAddress }, "Token amount measured via balanceOf diff");
+    } else {
+      logger.warn({ tradeId, balBeforeBuy: balBeforeBuy.toString(), balAfter: balAfter.toString(), tokenAddress }, "balanceOf diff: no increase detected");
     }
-  } catch {
-    logger.warn({ tradeId, tokenAddress }, "balanceOf diff failed — token amount left blank");
+  } catch (err) {
+    logger.warn({ tradeId, tokenAddress, err: err instanceof Error ? err.message : String(err) }, "balanceOf diff failed — token amount left blank");
   }
 
   const tokensNum = tokenAmount ? parseFloat(tokenAmount) : 0;
@@ -940,6 +961,14 @@ async function runZoraSell(
     const res = await fetch(`${ZORA_QUOTE_API}/quote`, { method: "POST", headers, body: quoteBody });
     if (!res.ok) {
       const text = await res.text().catch(() => "");
+      // Detect "SwapError: Failed to get quote" — no point retrying, surface immediately
+      const isNoRoute =
+        text.includes("SwapError") ||
+        text.includes("Failed to get quote") ||
+        (res.status === 400 && text.includes("UNKNOWN"));
+      if (isNoRoute) {
+        throw new Error(`ZoraNoRoute: ${text.slice(0, 200)}`);
+      }
       if (attempt < 3) {
         logger.warn({ tradeId, attempt, status: res.status, body: text.slice(0, 100) }, "Zora sell quote failed, retry in 5s");
         await new Promise(r => setTimeout(r, 5_000));
@@ -949,6 +978,10 @@ async function runZoraSell(
     }
     const data = await res.json();
     if (!data.call) {
+      // API returned 200 but with an error payload — treat as no-route
+      if (data.success === false || data.success === "false" || data.error) {
+        throw new Error(`ZoraNoRoute: ${JSON.stringify(data).slice(0, 200)}`);
+      }
       if (attempt < 3) {
         logger.warn({ tradeId, attempt, data }, "Zora sell quote: no call field, retry in 5s");
         await new Promise(r => setTimeout(r, 5_000));
