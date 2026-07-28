@@ -736,14 +736,11 @@ async function monitorTpSl(
 ): Promise<void> {
   if (!takeProfitPercent && !stopLossPercent) return;
 
+  // Throws if wallet key is not configured — caller's .catch() will log the error.
+  // Do NOT fall back to ZERO_ADDRESS: its balance is always 0n and would cause
+  // the monitor to incorrectly mark the position as "sold" on the first TP/SL trigger.
+  const probeAccount: Address = privateKeyToAccount(getWalletKey()).address;
   const publicClient = makePublicClient();
-
-  let probeAccount: Address;
-  try {
-    probeAccount = privateKeyToAccount(getWalletKey()).address;
-  } catch {
-    probeAccount = ZERO_ADDRESS;
-  }
 
   const tpPrice = takeProfitPercent ? entryPriceEth * (1 + takeProfitPercent / 100) : null;
   const slPrice = stopLossPercent ? entryPriceEth * (1 - stopLossPercent / 100) : null;
