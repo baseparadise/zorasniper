@@ -125,11 +125,20 @@ interface ZoraQuoteResult {
  *
  * The Zora API returns sell calldata with a literal ASCII placeholder
  * "REPLACE_WITH_PERMIT_SIGNATURE_1" where the 65-byte EIP-712 signature
- * must be inserted.  The bytes field is ABI-encoded as:
- *   - 32 bytes = length prefix (0x41 = 65)
- *   - 65 bytes = signature
+ * must be inserted.  The slot is always exactly 128 bytes (256 hex chars):
+ *   - 32 bytes = inner length prefix (0x41 = 65) — ABI-encodes the bytes value
+ *   - 65 bytes = signature data
  *   - 31 bytes = zero-padding to next 32-byte boundary
- * Total span in the hex string: 256 chars (128 bytes).
+ *   Total: 128 bytes = 256 hex chars
+ *
+ * The outer ABI length word (immediately before the placeholder) is set to
+ * 0x80 = 128 by the Zora API, meaning the bytes field carries 128 bytes of data —
+ * the inner ABI-encoding of the 65-byte signature.
+ *
+ * IMPORTANT: the 256-char slot is NOT all zeros after the placeholder.
+ * Words 3–4 of the slot may contain non-zero bytes (e.g. 0x60 offset and
+ * token address from other encoding layers).  The slot must be replaced in
+ * full using a fixed offset, NOT with a while-zero-skip loop.
  */
 function injectPermitSignature(callDataHex: string, signature: `0x${string}`): string {
   const PLACEHOLDER = "REPLACE_WITH_PERMIT_SIGNATURE_1";
@@ -142,26 +151,27 @@ function injectPermitSignature(callDataHex: string, signature: `0x${string}`): s
     throw new Error(`injectPermitSignature: unexpected signature length ${sigHex.length} (expected 130 hex chars)`);
   }
 
-  // The Zora API embeds the placeholder followed by zero-padding into the calldata.
-  // The placeholder text (31 chars) + trailing zeros together occupy the space that the
-  // full ABI-encoded signature slot should fill. We must skip ALL of them before
-  // appending the rest of the calldata — otherwise the extra zeros corrupt the ABI
-  // encoding and cause the tx to revert.
-  //
-  // Full ABI slot for a 65-byte bytes value:
-  //   32 bytes = length (0x41 = 65)  → 64 hex chars
-  //   65 bytes = signature data       → 130 hex chars
-  //   31 bytes = zero-padding         → 62 hex chars
-  //   Total: 128 bytes = 256 hex chars
+  // The full ABI-encoded slot is always 128 bytes = 256 hex chars:
+  //   64 chars (32 bytes) = inner length prefix 0x41 = 65
+  //   130 chars (65 bytes) = ECDSA signature
+  //   62 chars (31 bytes) = zero-padding to 32-byte boundary
   const lengthPrefix = "0000000000000000000000000000000000000000000000000000000000000041"; // 64 chars
   const zeroPad = "0".repeat(62); // 31 bytes padding → 62 chars
   const encodedSig = lengthPrefix + sigHex + zeroPad; // 256 chars total
 
-  // Skip past the placeholder AND all zero chars that follow it (they are the
-  // compressed zero-filled remainder of the slot in the API response).
-  let slotEnd = idx + PLACEHOLDER.length;
-  while (slotEnd < callDataHex.length && callDataHex[slotEnd] === "0") {
-    slotEnd++;
+  // The slot occupies exactly SLOT_CHARS = 256 hex chars starting at idx.
+  // We must NOT use a while-zero-skip loop: the last two 32-byte words of the
+  // slot contain non-zero bytes (0x60 offset pointer and the token address from
+  // the inner encoding), so a zero-skip would stop far too early and GROW the
+  // calldata by 33 bytes — corrupting every ABI offset that follows.
+  const SLOT_CHARS = 256;
+  const slotEnd = idx + SLOT_CHARS;
+
+  if (slotEnd > callDataHex.length) {
+    throw new Error(
+      `injectPermitSignature: slot extends beyond calldata end ` +
+      `(idx=${idx}, slotEnd=${slotEnd}, len=${callDataHex.length})`,
+    );
   }
 
   return callDataHex.slice(0, idx) + encodedSig + callDataHex.slice(slotEnd);
