@@ -6,6 +6,9 @@ import {
   formatEther,
   formatUnits,
   maxUint256,
+  encodeFunctionData,
+  encodeAbiParameters,
+  encodePacked,
   type Address,
 } from "viem";
 import { base } from "viem/chains";
@@ -269,6 +272,320 @@ async function fetchZoraQuote(params: {
 /** USDC address on Base — primary sell currency (more reliable routing than ETH for Zora content coins). */
 const USDC_BASE = "0x833589fCD6eDb6E08f4c7C32D4f71b54bdA02913" as Address;
 const USDC_DECIMALS = 6;
+
+    // ── Uniswap V4 Universal Router ───────────────────────────────────────────
+
+    /** Universal Router V4 on Base — sell directly without Zora API. */
+    const UNIVERSAL_ROUTER_V4 = "0x6fF5693b99212Da76ad316178a184AB56D299b43" as Address;
+
+    /** Zora factory — looked up to retrieve CoinCreatedV4 poolKey at sell time. */
+    const ZORA_FACTORY_ADDR = "0x777777751622c0d3258f214F9DF38E35BF45baF3" as Address;
+
+    // Inner V4 Router action bytes (Uniswap V4 periphery Actions.sol)
+    const V4_ACTION_SWAP_EXACT_IN_SINGLE = 0x00;
+    const V4_ACTION_SETTLE_ALL = 0x09;
+    const V4_ACTION_TAKE_ALL = 0x0c;
+
+    const COIN_CREATED_V4_SCHEMA = {
+    type: "event",
+    name: "CoinCreatedV4",
+    inputs: [
+      { name: "caller", type: "address", indexed: true },
+      { name: "payoutRecipient", type: "address", indexed: true },
+      { name: "platformReferrer", type: "address", indexed: true },
+      { name: "currency", type: "address", indexed: false },
+      { name: "uri", type: "string", indexed: false },
+      { name: "name", type: "string", indexed: false },
+      { name: "symbol", type: "string", indexed: false },
+      { name: "coin", type: "address", indexed: false },
+      {
+        name: "poolKey",
+        type: "tuple",
+        indexed: false,
+        components: [
+          { name: "currency0", type: "address" },
+          { name: "currency1", type: "address" },
+          { name: "fee", type: "uint24" },
+          { name: "tickSpacing", type: "int24" },
+          { name: "hooks", type: "address" },
+        ],
+      },
+      { name: "poolKeyHash", type: "bytes32", indexed: false },
+      { name: "version", type: "string", indexed: false },
+    ],
+    } as const;
+
+    const UNIVERSAL_ROUTER_EXECUTE_ABI = [
+    {
+      type: "function",
+      name: "execute",
+      stateMutability: "payable",
+      inputs: [
+        { name: "commands", type: "bytes" },
+        { name: "inputs", type: "bytes[]" },
+        { name: "deadline", type: "uint256" },
+      ],
+      outputs: [],
+    },
+    ] as const;
+
+    interface V4PoolKey {
+    currency0: Address;
+    currency1: Address;
+    fee: number;
+    tickSpacing: number;
+    hooks: Address;
+    }
+
+    /**
+    * Look up the Uniswap V4 pool key for a Zora coin from factory event logs.
+    * When mintBlockNumber is known the scan covers only ~40 blocks; otherwise
+    * it chunks through the last 50 000 blocks (≈1.2 days on Base).
+    */
+    async function fetchV4PoolKey(
+    tokenAddress: Address,
+    mintBlockNumber: bigint | null,
+    publicClient: ReturnType<typeof createPublicClient>,
+    ): Promise<V4PoolKey | null> {
+    const latestBlock = await publicClient.getBlockNumber();
+    let fromBlock: bigint;
+    let toBlock: bigint;
+
+    if (mintBlockNumber && mintBlockNumber > 0n) {
+      fromBlock = mintBlockNumber > 20n ? mintBlockNumber - 20n : 0n;
+      toBlock = mintBlockNumber + 20n;
+    } else {
+      fromBlock = latestBlock > 50_000n ? latestBlock - 50_000n : 0n;
+      toBlock = latestBlock;
+    }
+
+    const CHUNK = 2_000n; // Alchemy cap for un-indexed topic queries
+    for (let start = fromBlock; start <= toBlock; start += CHUNK) {
+      const end = start + CHUNK - 1n < toBlock ? start + CHUNK - 1n : toBlock;
+      // eslint-disable-next-line @typescript-eslint/no-explicit-any
+      const logs = await publicClient.getLogs({
+        address: ZORA_FACTORY_ADDR,
+        event: COIN_CREATED_V4_SCHEMA as any,
+        fromBlock: start,
+        toBlock: end,
+      });
+      for (const log of logs) {
+        // eslint-disable-next-line @typescript-eslint/no-explicit-any
+        const args = (log as any).args as { coin?: string; poolKey?: V4PoolKey };
+        if (args.coin?.toLowerCase() === tokenAddress.toLowerCase() && args.poolKey) {
+          return args.poolKey as V4PoolKey;
+        }
+      }
+    }
+    return null;
+    }
+
+    /**
+    * Sell token via Uniswap V4 Universal Router — no Zora API, no Permit2.
+    *
+    * Steps:
+    *  1. Fetch CoinCreatedV4 poolKey from Zora factory logs
+    *  2. Standard ERC-20 approve to Universal Router
+    *  3. Encode V4_SWAP + SETTLE_ALL + TAKE_ALL → execute()
+    *  4. Record amount received in DB
+    */
+    export async function executeUniversalRouterSell(params: {
+    tradeId: number;
+    tokenAddress: Address;
+    tokenBalance: bigint;
+    slippagePercent: number;
+    maxGasGwei: number;
+    reason: string;
+    }): Promise<void> {
+    const { tradeId, tokenAddress, tokenBalance, maxGasGwei, reason } = params;
+    const account = privateKeyToAccount(getWalletKey());
+    const httpUrl = getHttpRpcUrl();
+    const publicClient = createPublicClient({ chain: base, transport: http(httpUrl) });
+    const walletClient = createWalletClient({ account, chain: base, transport: http(httpUrl) });
+
+    const logCtx = { tradeId, reason, method: "uniswap_v4_router" };
+    logger.info(logCtx, "executeUniversalRouterSell: starting");
+
+    // Get blockNumber from DB to narrow pool-key search window
+    const [tradeRec] = await db
+      .select({ blockNumber: tradesTable.blockNumber })
+      .from(tradesTable)
+      .where(eq(tradesTable.id, tradeId));
+    const mintBlock = tradeRec?.blockNumber ? BigInt(tradeRec.blockNumber) : null;
+
+    // ── Resolve poolKey ───────────────────────────────────────────────────────
+    const poolKey = await fetchV4PoolKey(tokenAddress, mintBlock, publicClient);
+    if (!poolKey) {
+      throw new Error(
+        `executeUniversalRouterSell: no CoinCreatedV4 poolKey found for ${tokenAddress}`,
+      );
+    }
+    logger.info({ ...logCtx, poolKey }, "V4 poolKey resolved");
+
+    // ── Swap direction ────────────────────────────────────────────────────────
+    const zeroForOne = poolKey.currency0.toLowerCase() === tokenAddress.toLowerCase();
+    const outCurrency: Address = zeroForOne ? poolKey.currency1 : poolKey.currency0;
+    const isNativeOut = BigInt(outCurrency) === 0n;
+
+    // Snapshot balances before sell
+    const ethBefore = isNativeOut ? await publicClient.getBalance({ address: account.address }) : 0n;
+    const erc20Before = !isNativeOut
+      ? await publicClient.readContract({
+          address: outCurrency,
+          abi: ERC20_ABI,
+          functionName: "balanceOf",
+          args: [account.address],
+        })
+      : 0n;
+
+    // ── Approve Universal Router (plain ERC-20, no Permit2) ───────────────────
+    const allowance = await publicClient.readContract({
+      address: tokenAddress,
+      abi: ERC20_ABI,
+      functionName: "allowance",
+      args: [account.address, UNIVERSAL_ROUTER_V4],
+    });
+    if (allowance < tokenBalance) {
+      logger.info({ ...logCtx, spender: UNIVERSAL_ROUTER_V4 }, "Approving Universal Router V4");
+      const approveTx = await walletClient.writeContract({
+        address: tokenAddress,
+        abi: ERC20_ABI,
+        functionName: "approve",
+        args: [UNIVERSAL_ROUTER_V4, maxUint256],
+        chain: base,
+        account,
+      });
+      await publicClient.waitForTransactionReceipt({ hash: approveTx, timeout: 60_000 });
+      logger.info({ ...logCtx, approveTx }, "Approval confirmed");
+    }
+
+    // ── Encode V4 swap ────────────────────────────────────────────────────────
+    const actions = encodePacked(
+      ["uint8", "uint8", "uint8"],
+      [V4_ACTION_SWAP_EXACT_IN_SINGLE, V4_ACTION_SETTLE_ALL, V4_ACTION_TAKE_ALL],
+    );
+
+    const amountOutMinimum = 0n;
+
+    const swapParams = encodeAbiParameters(
+      [
+        {
+          type: "tuple",
+          components: [
+            {
+              type: "tuple",
+              name: "poolKey",
+              components: [
+                { type: "address", name: "currency0" },
+                { type: "address", name: "currency1" },
+                { type: "uint24", name: "fee" },
+                { type: "int24", name: "tickSpacing" },
+                { type: "address", name: "hooks" },
+              ],
+            },
+            { type: "bool", name: "zeroForOne" },
+            { type: "uint128", name: "amountIn" },
+            { type: "uint128", name: "amountOutMinimum" },
+            { type: "bytes", name: "hookData" },
+          ],
+        },
+      ],
+      [{ poolKey, zeroForOne, amountIn: tokenBalance, amountOutMinimum, hookData: "0x" }],
+    );
+
+    const settleParams = encodeAbiParameters(
+      [{ type: "address" }, { type: "uint256" }],
+      [tokenAddress, tokenBalance],
+    );
+
+    const takeParams = encodeAbiParameters(
+      [{ type: "address" }, { type: "uint256" }],
+      [outCurrency, amountOutMinimum],
+    );
+
+    const v4SwapInput = encodeAbiParameters(
+      [{ type: "bytes" }, { type: "bytes[]" }],
+      [actions, [swapParams, settleParams, takeParams]],
+    );
+
+    const deadline = BigInt(Math.floor(Date.now() / 1000) + 300);
+    const callData = encodeFunctionData({
+      abi: UNIVERSAL_ROUTER_EXECUTE_ABI,
+      functionName: "execute",
+      args: ["0x10" as `0x${string}`, [v4SwapInput], deadline],
+    });
+
+    // ── Gas estimation → send tx ──────────────────────────────────────────────
+    const maxFeeCapWei = BigInt(Math.round(maxGasGwei * 1e9));
+    let feeEstimate: { maxFeePerGas: bigint; maxPriorityFeePerGas: bigint };
+    let estimatedGas: bigint;
+    try {
+      const [fees, gas] = await Promise.all([
+        publicClient.estimateFeesPerGas(),
+        publicClient.estimateGas({ to: UNIVERSAL_ROUTER_V4, data: callData, account: account.address }),
+      ]);
+      feeEstimate = fees;
+      estimatedGas = gas;
+    } catch (gasErr) {
+      logger.warn({ ...logCtx, err: gasErr }, "Gas estimation failed — using 600k fallback");
+      feeEstimate = await publicClient.estimateFeesPerGas();
+      estimatedGas = 600_000n;
+    }
+
+    const maxFeePerGas =
+      feeEstimate.maxFeePerGas < maxFeeCapWei ? feeEstimate.maxFeePerGas : maxFeeCapWei;
+    const maxPriorityFeePerGas =
+      feeEstimate.maxPriorityFeePerGas < maxFeePerGas
+        ? feeEstimate.maxPriorityFeePerGas
+        : maxFeePerGas;
+    const gasLimit = (estimatedGas * 120n) / 100n; // 20% buffer for V4 hook calls
+
+    logger.info(
+      { ...logCtx, gasLimit: gasLimit.toString(), maxFeePerGas: maxFeePerGas.toString() },
+      "Sending Universal Router V4 sell tx",
+    );
+
+    const sellTxHash = await walletClient.sendTransaction({
+      to: UNIVERSAL_ROUTER_V4,
+      data: callData,
+      chain: base,
+      account,
+      maxFeePerGas,
+      maxPriorityFeePerGas,
+      gas: gasLimit,
+    });
+
+    logger.info({ ...logCtx, sellTxHash }, "Tx submitted — waiting for receipt");
+    await publicClient.waitForTransactionReceipt({ hash: sellTxHash, timeout: 120_000 });
+    logger.info({ ...logCtx, sellTxHash }, "Universal Router V4 sell confirmed");
+
+    // ── Calculate received amount ─────────────────────────────────────────────
+    let sellAmountEth: string;
+    if (isNativeOut) {
+      const ethAfter = await publicClient.getBalance({ address: account.address });
+      const received = ethAfter > ethBefore ? ethAfter - ethBefore : 0n;
+      sellAmountEth = formatEther(received);
+    } else {
+      const erc20After = await publicClient.readContract({
+        address: outCurrency,
+        abi: ERC20_ABI,
+        functionName: "balanceOf",
+        args: [account.address],
+      });
+      const received = erc20After > erc20Before ? erc20After - erc20Before : 0n;
+      const isUsdc = outCurrency.toLowerCase() === USDC_BASE.toLowerCase();
+      sellAmountEth = isUsdc ? formatUnits(received, USDC_DECIMALS) : formatEther(received);
+    }
+
+    const [updated] = await db
+      .update(tradesTable)
+      .set({ status: "sold", sellTxHash, sellAmountEth, pnlEth: sellAmountEth })
+      .where(eq(tradesTable.id, tradeId))
+      .returning();
+
+    broadcast("trade", updated);
+    logger.info({ ...logCtx, sellAmountEth }, "Sell confirmed via Uniswap V4 Universal Router");
+    }
 
 /**
  * Generic Zora Quote API caller.
@@ -583,7 +900,33 @@ async function fetchZoraPriceProbe(
  * ("REPLACE_WITH_PERMIT_SIGNATURE_1") that must be signed and injected before
  * the tx is submitted. This function handles that automatically.
  */
+/**
+ * Sell a token position.
+ * Primary: Uniswap V4 Universal Router (direct on-chain, no Zora API).
+ * Fallback: Zora Quote API (used if V4 poolKey not found in factory events).
+ */
 export async function executeZoraSell(params: {
+  tradeId: number;
+  tokenAddress: Address;
+  tokenBalance: bigint;
+  slippagePercent: number;
+  maxGasGwei: number;
+  reason: string;
+}): Promise<void> {
+  try {
+    await executeUniversalRouterSell(params);
+    return; // sold via Uniswap V4
+  } catch (v4Err) {
+    logger.warn(
+      { tradeId: params.tradeId, err: v4Err instanceof Error ? v4Err.message : String(v4Err) },
+      "Universal Router V4 sell failed — falling back to Zora API",
+    );
+  }
+  await executeZoraSellViaApi(params);
+}
+
+/** Original Zora Quote API sell — kept as fallback. */
+async function executeZoraSellViaApi(params: {
   tradeId: number;
   tokenAddress: Address;
   tokenBalance: bigint;
