@@ -15,6 +15,8 @@ import { privateKeyToAccount } from "viem/accounts";
 import { db, tradesTable, type Trade } from "@workspace/db";
 import { eq, and, inArray, desc } from "drizzle-orm";
 import { logger } from "../lib/logger";
+import { executeZoraSell, monitorTpSlSniper } from "../bot/trader";
+import { loadConfig } from "../lib/config";
 import { z } from "zod/v4";
 
 const router: IRouter = Router();
@@ -727,7 +729,7 @@ router.get("/positions", async (_req, res): Promise<void> => {
   const openTrades = await db
     .select()
     .from(tradesTable)
-    .where(and(eq(tradesTable.source, "manual"), eq(tradesTable.status, "confirmed")))
+    .where(eq(tradesTable.status, "confirmed"))
     .orderBy(desc(tradesTable.timestamp));
 
   if (openTrades.length === 0) {
@@ -819,7 +821,7 @@ router.post("/positions/:id/sell", async (req, res): Promise<void> => {
   const [trade] = await db
     .select()
     .from(tradesTable)
-    .where(and(eq(tradesTable.id, id), eq(tradesTable.source, "manual"), eq(tradesTable.status, "confirmed")));
+    .where(and(eq(tradesTable.id, id), eq(tradesTable.status, "confirmed")));
 
   if (!trade) { res.status(404).json({ error: "Position not found or already closed" }); return; }
 
@@ -855,9 +857,23 @@ router.post("/positions/:id/sell", async (req, res): Promise<void> => {
   // Respond immediately; sell executes in background
   res.status(202).json(trade);
 
-  runMarketSell(trade.id, addr, rawBal, trade.buyAmountEth ?? "0").catch((err) =>
-    logger.error({ err, tradeId: trade.id }, "Market sell background error"),
-  );
+  // Route sell to correct DEX: sniper positions use Zora API; manual positions use Li.Fi
+  if (trade.source === "sniper") {
+    loadConfig().then((config) =>
+      executeZoraSell({
+        tradeId: trade.id,
+        tokenAddress: addr,
+        tokenBalance: rawBal,
+        slippagePercent: config.slippagePercent,
+        maxGasGwei: config.maxGasGwei,
+        reason: "manual_sell",
+      })
+    ).catch((err) => logger.error({ err, tradeId: trade.id }, "Sniper market sell background error"));
+  } else {
+    runMarketSell(trade.id, addr, rawBal, trade.buyAmountEth ?? "0").catch((err) =>
+      logger.error({ err, tradeId: trade.id }, "Market sell background error"),
+    );
+  }
 });
 
 // ── Update TP/SL ───────────────────────────────────────────────────────────
@@ -877,7 +893,7 @@ router.put("/positions/:id/tpsl", async (req, res): Promise<void> => {
   const [trade] = await db
     .select()
     .from(tradesTable)
-    .where(and(eq(tradesTable.id, id), eq(tradesTable.source, "manual"), eq(tradesTable.status, "confirmed")));
+    .where(and(eq(tradesTable.id, id), eq(tradesTable.status, "confirmed")));
 
   if (!trade) { res.status(404).json({ error: "Position not found or already closed" }); return; }
 
@@ -894,17 +910,31 @@ router.put("/positions/:id/tpsl", async (req, res): Promise<void> => {
 
   res.json(updated);
 
-  // Start/restart TP/SL monitor with new values
+  // Start/restart TP/SL monitor with new values — sniper uses Zora API monitor, manual uses Li.Fi monitor
   const entryPrice = updated.entryPriceEth ? parseFloat(updated.entryPriceEth) : 0;
   if ((takeProfitPercent || stopLossPercent) && entryPrice > 0) {
-    monitorTpSl(
-      updated.id,
-      updated.tokenAddress as Address,
-      entryPrice,
-      takeProfitPercent ?? null,
-      stopLossPercent ?? null,
-      updated.buyAmountEth ?? "0",
-    ).catch((err) => logger.error({ err, tradeId: updated.id }, "TP/SL monitor restart error"));
+    if (updated.source === "sniper") {
+      loadConfig().then((config) =>
+        monitorTpSlSniper(
+          updated.id,
+          updated.tokenAddress as Address,
+          entryPrice,
+          takeProfitPercent ?? null,
+          stopLossPercent ?? null,
+          config.slippagePercent,
+          config.maxGasGwei,
+        )
+      ).catch((err) => logger.error({ err, tradeId: updated.id }, "Sniper TP/SL monitor restart error"));
+    } else {
+      monitorTpSl(
+        updated.id,
+        updated.tokenAddress as Address,
+        entryPrice,
+        takeProfitPercent ?? null,
+        stopLossPercent ?? null,
+        updated.buyAmountEth ?? "0",
+      ).catch((err) => logger.error({ err, tradeId: updated.id }, "TP/SL monitor restart error"));
+    }
   }
 });
 
