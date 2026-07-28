@@ -282,9 +282,9 @@ const USDC_DECIMALS = 6;
     const ZORA_FACTORY_ADDR = "0x777777751622c0d3258f214F9DF38E35BF45baF3" as Address;
 
     // Inner V4 Router action bytes (Uniswap V4 periphery Actions.sol)
-    const V4_ACTION_SWAP_EXACT_IN_SINGLE = 0x00;
-    const V4_ACTION_SETTLE_ALL = 0x09;
-    const V4_ACTION_TAKE_ALL = 0x0c;
+    const V4_ACTION_SWAP_EXACT_IN_SINGLE = 0x06;
+    const V4_ACTION_SETTLE_ALL = 0x0c;
+    const V4_ACTION_TAKE_ALL = 0x0f;
 
     const COIN_CREATED_V4_SCHEMA = {
     type: "event",
@@ -486,11 +486,12 @@ const USDC_DECIMALS = 6;
             { type: "bool", name: "zeroForOne" },
             { type: "uint128", name: "amountIn" },
             { type: "uint128", name: "amountOutMinimum" },
+            { type: "uint256", name: "minHopPriceX36" },
             { type: "bytes", name: "hookData" },
           ],
         },
       ],
-      [{ poolKey, zeroForOne, amountIn: tokenBalance, amountOutMinimum, hookData: "0x" }],
+      [{ poolKey, zeroForOne, amountIn: tokenBalance, amountOutMinimum, minHopPriceX36: 0n, hookData: "0x" }],
     );
 
     const settleParams = encodeAbiParameters(
