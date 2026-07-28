@@ -1,9 +1,11 @@
 import express, { type Express, type Request, type Response, type NextFunction } from "express";
 import cors from "cors";
+import cookieParser from "cookie-parser";
 import pinoHttp from "pino-http";
 import { join } from "path";
 import { existsSync } from "fs";
-import router from "./routes";
+import { publicRouter, protectedRouter } from "./routes";
+import { authMiddleware } from "./middlewares/auth";
 import { logger } from "./lib/logger";
 
 const app: Express = express();
@@ -28,10 +30,18 @@ app.use(
   }),
 );
 app.use(cors());
+app.use(cookieParser());
 app.use(express.json());
 app.use(express.urlencoded({ extended: true }));
 
-app.use("/api", router);
+// Public routes — healthz + auth/login + auth/logout (no session required)
+app.use("/api", publicRouter);
+
+// Auth gate — everything below this requires a valid session cookie
+app.use("/api", authMiddleware);
+
+// Protected routes
+app.use("/api", protectedRouter);
 
 // Serve frontend static files — check built Vite dist first, then static public folder
 const frontendDist = join(process.cwd(), "artifacts/zora-sniper/dist/public");
