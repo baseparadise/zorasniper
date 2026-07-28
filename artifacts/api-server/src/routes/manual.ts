@@ -10,6 +10,7 @@ import {
   type Address,
   type Account,
 } from "viem";
+import { getLiFiQuote, ensureApproval, ETH_ADDRESS, type LiFiQuoteResponse } from "../lib/lifi";
 import { base } from "viem/chains";
 import { privateKeyToAccount } from "viem/accounts";
 import { db, tradesTable, type Trade } from "@workspace/db";
@@ -24,10 +25,7 @@ const router: IRouter = Router();
 // ── Constants ──────────────────────────────────────────────────────────────
 
 const ZERO_ADDRESS = "0x0000000000000000000000000000000000000000" as Address;
-// Native ETH pseudo-address used by Li.Fi
-const ETH_ADDRESS = "0x0000000000000000000000000000000000000000" as Address;
-const BASE_CHAIN_ID = 8453;
-const LIFI_INTEGRATOR = "zorasniper001"; // Li.Fi integration ID
+const BASE_CHAIN_ID = 8453; // used for Zora Quote API chain param
 /** USDC on Base — primary Zora sell output (more reliable routing than ETH for Zora Coins). */
 const USDC_BASE = "0x833589fCD6eDb6E08f4c7C32D4f71b54bdA02913" as Address;
 const USDC_DECIMALS = 6;
@@ -357,115 +355,6 @@ async function fetchZoraPriceProbe(tokenAddress: string, sender: string): Promis
 
 // ── Li.Fi integration ──────────────────────────────────────────────────────
 
-interface LiFiQuoteResponse {
-  transactionRequest: {
-    to: string;
-    data: string;
-    value: string;
-    gasLimit?: string;
-    gasPrice?: string;
-    from?: string;
-  };
-  estimate: {
-    fromAmount: string;
-    toAmount: string;         // expected tokens out (no slippage)
-    toAmountMin: string;      // minimum tokens out (with slippage)
-    approvalAddress?: string; // spender address for ERC20 approval
-    gasCosts?: { amount: string; amountUSD?: string }[];
-  };
-  action: {
-    fromToken: { address: string; decimals: number };
-    toToken: { address: string; decimals: number };
-    fromAmount: string;
-    slippage: number;
-  };
-  tool?: string; // DEX used, e.g. "uniswap"
-  id?: string;
-}
-
-/**
- * Get a swap quote from Li.Fi API.
- * fromToken / toToken are token addresses; use ETH_ADDRESS for native ETH.
- */
-async function getLiFiQuote(
-  fromToken: string,
-  toToken: string,
-  fromAmountWei: bigint,
-  fromAddress: Address,
-  slippagePercent: number,
-): Promise<LiFiQuoteResponse> {
-  const params = new URLSearchParams({
-    fromChain: String(BASE_CHAIN_ID),
-    toChain: String(BASE_CHAIN_ID),
-    fromToken,
-    toToken,
-    fromAmount: fromAmountWei.toString(),
-    fromAddress,
-    integrator: LIFI_INTEGRATOR,
-    slippage: (slippagePercent / 100).toFixed(4), // Li.Fi expects 0–1 (e.g. 0.05 for 5%)
-  });
-
-  const url = `https://li.quest/v1/quote?${params}`;
-  logger.info({ url }, "Fetching Li.Fi quote");
-
-  const res = await fetch(url, {
-    headers: {
-      Accept: "application/json",
-      ...(process.env.LIFI_API_KEY ? { "x-lifi-api-key": process.env.LIFI_API_KEY } : {}),
-    },
-    signal: AbortSignal.timeout(15_000),
-  });
-
-  const body = await res.json() as { message?: string; code?: number } & LiFiQuoteResponse;
-  if (!res.ok || !body.transactionRequest) {
-    const msg = body.message ?? JSON.stringify(body).slice(0, 300);
-    throw new Error(`Li.Fi quote failed (${res.status}): ${msg}`);
-  }
-
-  return body;
-}
-
-/**
- * Ensure the Li.Fi router has enough ERC20 allowance, approving if needed.
- * No-op for native ETH swaps (fromToken = ETH_ADDRESS).
- *
- * IMPORTANT: `account` must be the full Account object (from privateKeyToAccount),
- * NOT just account.address — viem's writeContract needs the signing key.
- */
-async function ensureApproval(
-  publicClient: ReturnType<typeof makePublicClient>,
-  walletClient: ReturnType<typeof createWalletClient>,
-  account: Account,
-  tokenAddress: Address,
-  spender: Address,
-  amount: bigint,
-): Promise<void> {
-  if (tokenAddress.toLowerCase() === ETH_ADDRESS.toLowerCase()) return;
-
-  const existing = await publicClient.readContract({
-    address: tokenAddress,
-    abi: ERC20_ABI,
-    functionName: "allowance",
-    args: [account.address as Address, spender],
-  });
-
-  if (existing >= amount) {
-    logger.info({ tokenAddress, spender, existing: existing.toString() }, "Allowance already sufficient");
-    return;
-  }
-
-  logger.info({ tokenAddress, spender, amount: amount.toString() }, "Approving Li.Fi spender");
-  const approveTx = await walletClient.writeContract({
-    address: tokenAddress,
-    abi: ERC20_ABI,
-    functionName: "approve",
-    args: [spender, maxUint256],
-    account,
-    chain: base,
-  });
-  await publicClient.waitForTransactionReceipt({ hash: approveTx });
-  logger.info({ approveTx }, "Approval confirmed");
-}
 
 // ── Buy executors ──────────────────────────────────────────────────────────
 
