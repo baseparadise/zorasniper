@@ -330,7 +330,7 @@ async function fetchZoraPriceProbe(
  * Approve the Zora router + execute a sell transaction via Zora Quote API.
  * Records sell result in the trades table and broadcasts the update.
  */
-async function executeZoraSell(params: {
+export async function executeZoraSell(params: {
   tradeId: number;
   tokenAddress: Address;
   tokenBalance: bigint;
@@ -591,7 +591,7 @@ export async function executeBuy(params: TradeParams): Promise<void> {
       ]);
       const received = balAfter - balBefore;
       if (received > 0n) {
-        tokenAmount = received.toString();
+        tokenAmount = formatUnits(received, 18);
         logger.info({ received: received.toString(), tokenAddress }, "Token amount measured via balanceOf diff");
       }
     } catch {
