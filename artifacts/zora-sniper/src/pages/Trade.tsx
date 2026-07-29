@@ -276,14 +276,16 @@ function PositionCard({ position, onRefresh }: { position: any; onRefresh: () =>
         </div>
         <div className="rounded-xl bg-white/5 p-2.5">
           <p className="text-white/30 text-[10px] uppercase tracking-wider mb-1">Est. Value</p>
-          <p className="text-white font-mono text-xs font-semibold">
-            {liveValueUsd !== null ? formatUsd(liveValueUsd) : "—"}
-          </p>
-          {!livePnlZero && (
-            <p className={cn("text-[10px] font-mono mt-0.5", livePnlPositive ? "text-green-400" : "text-red-400")}>
-              {livePnlPositive ? "+" : ""}{livePnlPct.toFixed(2)}%
+          <div className="flex items-baseline gap-1.5 flex-wrap">
+            <p className="text-white font-mono text-xs font-semibold">
+              {liveValueUsd !== null ? formatUsd(liveValueUsd) : "—"}
             </p>
-          )}
+            {!livePnlZero && (
+              <span className={cn("text-[10px] font-mono font-semibold leading-none", livePnlPositive ? "text-green-400" : "text-red-400")}>
+                ({livePnlPositive ? "+" : ""}{livePnlPct.toFixed(1)}%)
+              </span>
+            )}
+          </div>
         </div>
       </div>
 
