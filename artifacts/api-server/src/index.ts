@@ -4,6 +4,7 @@ import { logger } from "./lib/logger";
 import { startWsServer } from "./bot/ws";
 import { pool } from "@workspace/db";
 import { recoverTpSlMonitors } from './routes/manual';
+import { recoverSniperTpSlMonitors } from './bot/trader';
 
 const rawPort = process.env["PORT"];
 
@@ -96,6 +97,15 @@ async function applyMigrations(): Promise<void> {
           ADD COLUMN IF NOT EXISTS entry_price_eth    TEXT
       `,
     },
+    {
+      // Add entry_value_usdc column for value-based TP/SL tracking.
+      // Replaces the old entry_price_eth approach for sniper monitors:
+      // stores USDC value of the token position immediately after buy
+      // (via sell-direction quote), so the monitor compares position value
+      // rather than price-per-token (which was 31x off due to probe impact).
+      name: "005_trades_entry_value_usdc",
+      sql: `ALTER TABLE trades ADD COLUMN IF NOT EXISTS entry_value_usdc TEXT`,
+    },
   ];
 
   let ran = 0;
@@ -129,9 +139,14 @@ applyMigrations()
       logger.info({ port }, 'Server listening');
     });
 
-    // Restart TP/SL monitors for any confirmed trades that survived a redeploy
+    // Restart TP/SL monitors for confirmed trades that survived a redeploy.
+    // Manual trades (Li.Fi monitor) and sniper trades (Zora API monitor)
+    // are recovered separately because they use different price probes.
     recoverTpSlMonitors().catch((err) =>
-      logger.error({ err }, 'TP/SL startup recovery failed'),
+      logger.error({ err }, 'Manual TP/SL startup recovery failed'),
+    );
+    recoverSniperTpSlMonitors().catch((err) =>
+      logger.error({ err }, 'Sniper TP/SL startup recovery failed'),
     );
 
     server.on("error", (err) => {
