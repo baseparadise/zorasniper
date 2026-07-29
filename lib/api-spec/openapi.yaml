@@ -560,8 +560,9 @@ components:
           type: ["string", "null"]
         stopLossPercent:
           type: ["string", "null"]
-        entryPriceEth:
+        entryValueUsdc:
           type: ["string", "null"]
+          description: USDC value of token position at buy time (from sell-direction quote). Used as TP/SL cost basis.
         sellTxHash:
           type: ["string", "null"]
         sellAmountEth:
