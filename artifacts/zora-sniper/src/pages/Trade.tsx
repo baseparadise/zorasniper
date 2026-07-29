@@ -1,3 +1,4 @@
+5e2e24d5fe2e5cfc268d6e36b1801f22ef5dad55
 import { useState, useEffect, useRef } from "react";
 import { useQueryClient } from "@tanstack/react-query";
 import {
@@ -274,12 +275,12 @@ function PositionCard({ position, onRefresh }: { position: any; onRefresh: () =>
       <div className="grid grid-cols-2 gap-2">
         <div className="rounded-xl bg-white/5 p-2.5">
           <p className="text-white/30 text-[10px] uppercase tracking-wider mb-1">Entry</p>
-          <p className="text-white font-mono text-xs font-semibold">{formatEth(trade.buyAmountEth)} ETH</p>
-          {entryPriceEth && parseFloat(entryPriceEth) > 0 && (
-            <p className="text-white/30 text-[10px] font-mono mt-0.5">
-              {parseFloat(entryPriceEth).toExponential(3)} ETH/tok
-            </p>
-          )}
+          <p className="text-white font-mono text-xs font-semibold">
+            {trade.entryValueUsdc && parseFloat(trade.entryValueUsdc) > 0
+              ? formatUsd(parseFloat(trade.entryValueUsdc))
+              : '—'}
+          </p>
+          <p className="text-white/30 text-[10px] font-mono mt-0.5">{formatEth(trade.buyAmountEth)} ETH</p>
         </div>
         <div className="rounded-xl bg-white/5 p-2.5">
           <p className="text-white/30 text-[10px] uppercase tracking-wider mb-1">Est. Value</p>
