@@ -105,6 +105,34 @@ function nextZoraKey(): string | undefined {
   return key;
 }
 
+/**
+ * Fetch USD price per token from Zora /coin API.
+ * Mirrors trader.ts fetchTokenPriceUsdc — market price × balance,
+ * consistent with the TP/SL monitor. Returns null if unavailable.
+ */
+async function fetchTokenPriceUsdc(tokenAddress: string): Promise<number | null> {
+  try {
+    const hdrs: Record<string, string> = {};
+    const apiKey = nextZoraKey();
+    if (apiKey) hdrs["x-api-key"] = apiKey;
+    const r = await fetch(
+      `${ZORA_QUOTE_API}/coin?chainId=8453&address=${tokenAddress.toLowerCase()}`,
+      { headers: hdrs, signal: AbortSignal.timeout(10_000) },
+    );
+    if (r.ok) {
+      const data = await r.json();
+      const priceInUsdc: string | undefined = data?.zora20Token?.tokenPrice?.priceInUsdc;
+      if (priceInUsdc) {
+        const p = parseFloat(priceInUsdc);
+        if (p > 0) return p;
+      }
+    }
+  } catch (err) {
+    logger.warn({ err, tokenAddress }, "fetchTokenPriceUsdc: /coin endpoint failed");
+  }
+  return null;
+}
+
 // Small ETH amount used as a price probe — never actually submitted as a tx.
 const PROBE_ETH_WEI = parseEther("0.001");
 const PROBE_AMOUNT_ETH = "0.001";
@@ -1675,32 +1703,30 @@ router.get("/positions", async (_req, res): Promise<void> => {
       const entryPriceNum = parseFloat(entryPriceEth);
       const balNum = parseFloat(currentBalanceTokens);
 
-      let currentValueEth = "0";
+      let currentValueUsdc = "0";
       let pnlPercent = 0;
 
-      if (balNum > 0 && entryPriceNum > 0) {
-        // ── Price probe: sell-direction Zora (same as TP/SL monitor) ──────
-        // Use actual rawBal so price impact matches the real position size.
+      if (balNum > 0) {
+        // ── USD value: market price × balance from Zora /coin API ─────────
+        // Same approach as TP/SL monitor (trader.ts fetchPositionValueUsdc).
+        // Avoids sell-direction quote which distorts thin-pool values.
         try {
-          let currentPrice: number | null = null;
-
-          const zoraPrice = await fetchZoraPriceProbe(addr, walletAddress, rawBal);
-          if (zoraPrice !== null) {
-            currentPrice = zoraPrice;
-          }
-
-          if (currentPrice !== null) {
-            const currentValue = balNum * currentPrice;
-            currentValueEth = currentValue.toFixed(6);
-            const buyEth = parseFloat(trade.buyAmountEth ?? "0");
-            pnlPercent = buyEth > 0 ? ((currentValue - buyEth) / buyEth) * 100 : 0;
+          const priceUsdc = await fetchTokenPriceUsdc(addr);
+          if (priceUsdc !== null) {
+            const valueUsdc = balNum * priceUsdc;
+            currentValueUsdc = valueUsdc.toFixed(6);
+            // PnL% vs USD cost basis (entryValueUsdc from buy time); 0 if not available
+            const entryUsdc = trade.entryValueUsdc ? parseFloat(trade.entryValueUsdc) : null;
+            if (entryUsdc && entryUsdc > 0) {
+              pnlPercent = ((valueUsdc - entryUsdc) / entryUsdc) * 100;
+            }
           }
         } catch {
           /* price unavailable — keep defaults */
         }
       }
 
-      return { trade, currentBalanceTokens, entryPriceEth, currentValueEth, pnlPercent };
+      return { trade, currentBalanceTokens, entryPriceEth, currentValueUsdc, pnlPercent };
     }),
   );
 
