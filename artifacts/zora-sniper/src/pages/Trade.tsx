@@ -1,5 +1,6 @@
 import { useState, useEffect, useRef } from "react";
 import { useQueryClient } from "@tanstack/react-query";
+import { useWebSocket } from "@/hooks/useWebSocket";
 import {
   useManualBuy,
   useListPositions,
@@ -446,12 +447,21 @@ export default function Trade() {
   const { toast } = useToast();
   const queryClient = useQueryClient();
   const manualBuy = useManualBuy();
+  const { subscribe } = useWebSocket();
 
   const [ca, setCa] = useState("");
   const [ethAmount, setEthAmount] = useState("0.01");
   const [slippage, setSlippage] = useState("5");
   const [tp, setTp] = useState("");
   const [sl, setSl] = useState("");
+
+  // WebSocket: invalidate positions immediately when monitor auto-sells (TP/SL triggered)
+  useEffect(() => {
+    const unsub = subscribe("trade", () => {
+      queryClient.invalidateQueries({ queryKey: getListPositionsQueryKey() });
+    });
+    return unsub;
+  }, [subscribe, queryClient]);
 
   // Debounce CA for token preview
   const [debouncedCa, setDebouncedCa] = useState("");
