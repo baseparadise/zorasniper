@@ -203,8 +203,11 @@ export interface Trade {
   takeProfitPercent?: string | null;
   /** @nullable */
   stopLossPercent?: string | null;
-  /** @nullable */
-  entryPriceEth?: string | null;
+  /**
+     * USDC value of token position at buy time (from sell-direction quote). Used as TP/SL cost basis.
+     * @nullable
+     */
+  entryValueUsdc?: string | null;
   /** @nullable */
   sellTxHash?: string | null;
   /** @nullable */
@@ -253,10 +256,14 @@ export interface Position {
   currentBalanceTokens: string;
   /** ETH paid per token at entry */
   entryPriceEth: string;
-  /** Estimated current value in ETH (balance * current price) */
-  currentValueEth: string;
+  /** Current USD value of position (balance × Zora market price) */
+  currentValueUsdc: string;
   /** Unrealised P&L in percent relative to entry */
   pnlPercent: number;
+  /** Current USD price per token from Zora API */
+  priceUsd?: string | null;
+  /** Current market cap in USD from Zora API */
+  mcUsd?: string | null;
 }
 
 export interface TokenInfo {

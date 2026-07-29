@@ -110,24 +110,19 @@ function TokenPreview({ address }: { address: string }) {
 function PositionCard({ position, onRefresh }: { position: any; onRefresh: () => void }) {
   const { trade, currentBalanceTokens, currentValueUsdc, pnlPercent, entryPriceEth } = position;
 
-  // Live token price/MC — refreshed every 30 s (same Zora API as TokenPreview above)
-  const { data: tokenInfo } = useGetTokenInfo(trade.tokenAddress as string, {
-    query: { refetchInterval: 30_000 },
-  });
+  // Price + MC + est. value come directly from the /positions response.
+  // The backend makes a single Zora /coin API call per position and returns
+  // priceUsd, mcUsd, and currentValueUsdc — no extra /token/:address call needed.
+  const livePriceUsd = position.priceUsd ? parseFloat(position.priceUsd as string) : null;
+  const liveMcUsd = position.mcUsd ? parseFloat(position.mcUsd as string) : null;
 
-  // Real-time USD value: balance × current market price (live from Zora /coin API)
-  // Falls back to backend-computed currentValueUsdc (same formula) on initial load
+  // Est. value: backend already computed balance × currentPrice, use it directly
   const liveValueUsd = (() => {
-    if (tokenInfo) {
-      const bal = parseFloat(tokenInfo.walletBalance ?? "0");
-      const price = parseFloat(tokenInfo.priceUsd ?? "0");
-      if (bal > 0 && price > 0) return bal * price;
-    }
     const usdc = parseFloat((currentValueUsdc as string) ?? "0");
     return usdc > 0 ? usdc : null;
   })();
 
-  // PnL% vs USD cost basis (entryValueUsdc); fallback to ETH-based pnlPercent from backend
+  // PnL%: same basis as TP/SL monitor (liveValueUsd vs entryValueUsdc)
   const livePnlPct = (() => {
     if (liveValueUsd === null) return pnlPercent;
     const entryUsdc = trade.entryValueUsdc ? parseFloat(trade.entryValueUsdc) : null;
@@ -136,9 +131,6 @@ function PositionCard({ position, onRefresh }: { position: any; onRefresh: () =>
   })();
   const livePnlPositive = livePnlPct > 0;
   const livePnlZero = Math.abs(livePnlPct) < 0.01;
-
-  const livePriceUsd = tokenInfo ? parseFloat(tokenInfo.priceUsd ?? "0") : null;
-  const liveMcUsd = tokenInfo ? parseFloat(tokenInfo.mcUsd ?? "0") : null;
   const pnlPositive = pnlPercent > 0;
   const pnlZero = pnlPercent === 0;
 
@@ -254,7 +246,7 @@ function PositionCard({ position, onRefresh }: { position: any; onRefresh: () =>
       </div>
 
       {/* Price / MC — live from Zora /coin API, refreshed every 30 s */}
-      {tokenInfo && (
+      {(livePriceUsd !== null || liveMcUsd !== null) && (
         <div className="grid grid-cols-2 gap-2">
           <div className="rounded-xl bg-white/5 p-2.5">
             <p className="text-white/30 text-[10px] uppercase tracking-wider mb-1">Price</p>
@@ -469,7 +461,9 @@ export default function Trade() {
     return () => { if (debounceRef.current) clearTimeout(debounceRef.current); };
   }, [ca]);
 
-  const { data: positions = [], isLoading: posLoading, refetch: refetchPositions } = useListPositions();
+  const { data: positions = [], isLoading: posLoading, refetch: refetchPositions } = useListPositions({
+    query: { refetchInterval: 30_000 },
+  });
 
   const handleBuy = () => {
     const addrOk = /^0x[0-9a-fA-F]{40}$/.test(ca.trim());

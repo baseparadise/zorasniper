@@ -611,7 +611,7 @@ components:
         - trade
         - currentBalanceTokens
         - entryPriceEth
-        - currentValueEth
+        - currentValueUsdc
         - pnlPercent
       properties:
         trade:
@@ -622,12 +622,20 @@ components:
         entryPriceEth:
           type: string
           description: ETH paid per token at entry
-        currentValueEth:
+        currentValueUsdc:
           type: string
-          description: Estimated current value in ETH (balance * current price)
+          description: Current USD value of position (balance × Zora market price)
         pnlPercent:
           type: number
           description: Unrealised P&L in percent relative to entry
+        priceUsd:
+          type: string
+          nullable: true
+          description: Current USD price per token from Zora API
+        mcUsd:
+          type: string
+          nullable: true
+          description: Current market cap in USD from Zora API
 
     TokenInfo:
       type: object

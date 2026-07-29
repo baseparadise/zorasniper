@@ -28,8 +28,11 @@ export interface Trade {
   takeProfitPercent?: string | null;
   /** @nullable */
   stopLossPercent?: string | null;
-  /** @nullable */
-  entryPriceEth?: string | null;
+  /**
+     * USDC value of token position at buy time (from sell-direction quote). Used as TP/SL cost basis.
+     * @nullable
+     */
+  entryValueUsdc?: string | null;
   /** @nullable */
   sellTxHash?: string | null;
   /** @nullable */

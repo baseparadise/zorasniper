@@ -25,3 +25,4 @@ export * from './trade';
 export * from './tradeSource';
 export * from './tradeStats';
 export * from './tradeStatus';
+export * from './updateTpSlRequest';

@@ -106,11 +106,12 @@ function nextZoraKey(): string | undefined {
 }
 
 /**
- * Fetch USD price per token from Zora /coin API.
- * Mirrors trader.ts fetchTokenPriceUsdc — market price × balance,
- * consistent with the TP/SL monitor. Returns null if unavailable.
+ * Fetch live market data (price + MC) for a token from the Zora /coin API.
+ * Returns { priceUsd, mcUsd } or null if unavailable.
+ * Single API call shared by the /positions endpoint so both price and MC
+ * come from one request — no duplicate calls per card.
  */
-async function fetchTokenPriceUsdc(tokenAddress: string): Promise<number | null> {
+async function fetchTokenMarketData(tokenAddress: string): Promise<{ priceUsd: number; mcUsd: number } | null> {
   try {
     const hdrs: Record<string, string> = {};
     const apiKey = nextZoraKey();
@@ -121,16 +122,24 @@ async function fetchTokenPriceUsdc(tokenAddress: string): Promise<number | null>
     );
     if (r.ok) {
       const data = await r.json();
-      const priceInUsdc: string | undefined = data?.zora20Token?.tokenPrice?.priceInUsdc;
-      if (priceInUsdc) {
-        const p = parseFloat(priceInUsdc);
-        if (p > 0) return p;
+      const token = data?.coin ?? data?.zora20Token;
+      const priceInUsdc: string | undefined = token?.tokenPrice?.priceInUsdc ?? token?.price;
+      const marketCap: string | number | undefined = token?.marketCap ?? token?.tokenPrice?.marketCap;
+      const priceUsd = priceInUsdc ? parseFloat(priceInUsdc) : 0;
+      if (priceUsd > 0) {
+        return { priceUsd, mcUsd: marketCap ? parseFloat(String(marketCap)) : 0 };
       }
     }
   } catch (err) {
-    logger.warn({ err, tokenAddress }, "fetchTokenPriceUsdc: /coin endpoint failed");
+    logger.warn({ err, tokenAddress }, "fetchTokenMarketData: /coin endpoint failed");
   }
   return null;
+}
+
+/** Thin wrapper used by buy flows that only need price. */
+async function fetchTokenPriceUsdc(tokenAddress: string): Promise<number | null> {
+  const data = await fetchTokenMarketData(tokenAddress);
+  return data ? data.priceUsd : null;
 }
 
 // Small ETH amount used as a price probe — never actually submitted as a tx.
@@ -1597,17 +1606,21 @@ router.get("/positions", async (_req, res): Promise<void> => {
 
       let currentValueUsdc = "0";
       let pnlPercent = 0;
+      let priceUsd: string | null = null;
+      let mcUsd: string | null = null;
 
       if (balNum > 0) {
-        // ── USD value: market price × balance from Zora /coin API ─────────
-        // Same approach as TP/SL monitor (trader.ts fetchPositionValueUsdc).
-        // Avoids sell-direction quote which distorts thin-pool values.
+        // ── Single Zora /coin API call: price + MC + est. value ───────────
+        // fetchTokenMarketData returns both priceUsd and mcUsd in one request.
+        // The frontend card uses these directly — no second /token/:address
+        // call needed per position. Formula is the same as the TP/SL monitor.
         try {
-          const priceUsdc = await fetchTokenPriceUsdc(addr);
-          if (priceUsdc !== null) {
-            const valueUsdc = balNum * priceUsdc;
+          const marketData = await fetchTokenMarketData(addr);
+          if (marketData !== null) {
+            const valueUsdc = balNum * marketData.priceUsd;
             currentValueUsdc = valueUsdc.toFixed(6);
-            // PnL% vs USD cost basis (entryValueUsdc from buy time); 0 if not available
+            priceUsd = marketData.priceUsd.toString();
+            mcUsd = marketData.mcUsd > 0 ? marketData.mcUsd.toString() : null;
             const entryUsdc = trade.entryValueUsdc ? parseFloat(trade.entryValueUsdc) : null;
             if (entryUsdc && entryUsdc > 0) {
               pnlPercent = ((valueUsdc - entryUsdc) / entryUsdc) * 100;
@@ -1618,7 +1631,7 @@ router.get("/positions", async (_req, res): Promise<void> => {
         }
       }
 
-      return { trade, currentBalanceTokens, entryPriceEth, currentValueUsdc, pnlPercent };
+      return { trade, currentBalanceTokens, entryPriceEth, currentValueUsdc, pnlPercent, priceUsd, mcUsd };
     }),
   );
 
