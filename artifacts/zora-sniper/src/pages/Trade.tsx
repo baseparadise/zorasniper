@@ -463,6 +463,28 @@ export default function Trade() {
     return unsub;
   }, [subscribe, queryClient]);
 
+  // WebSocket: receive live price/PnL snapshots from monitor every ~15s
+  // Overrides stale /positions poll data so card stays in sync with monitor.
+  const [positionOverrides, setPositionOverrides] = useState<Record<number, {
+    currentValueUsdc: string;
+    pnlPercent: number;
+    priceUsd: string;
+  }>>({});
+
+  useEffect(() => {
+    const unsub = subscribe("position_update", (payload: any) => {
+      setPositionOverrides(prev => ({
+        ...prev,
+        [payload.tradeId]: {
+          currentValueUsdc: String(payload.currentValueUsdc),
+          pnlPercent: payload.pnlPct,
+          priceUsd: String(payload.priceUsd),
+        },
+      }));
+    });
+    return unsub;
+  }, [subscribe]);
+
   // Debounce CA for token preview
   const [debouncedCa, setDebouncedCa] = useState("");
   const debounceRef = useRef<ReturnType<typeof setTimeout> | null>(null);
@@ -671,9 +693,13 @@ export default function Trade() {
           </div>
         ) : (
           <div className="space-y-3">
-            {positions.map((pos: any) => (
-              <PositionCard key={pos.trade.id} position={pos} onRefresh={() => refetchPositions()} />
-            ))}
+            {positions.map((pos: any) => {
+              const override = positionOverrides[pos.trade.id];
+              const mergedPos = override ? { ...pos, ...override } : pos;
+              return (
+                <PositionCard key={pos.trade.id} position={mergedPos} onRefresh={() => refetchPositions()} />
+              );
+            })}
           </div>
         )}
       </div>

@@ -1130,6 +1130,12 @@ export async function monitorTpSlSniper(
         "Sniper TP/SL value check",
       );
 
+      // Broadcast live price snapshot to frontend — keeps PositionCard in
+      // sync with the monitor's own view without an extra Zora API call.
+      const tokenAmount = parseFloat(formatUnits(tokenBalance, 18));
+      const priceUsd = tokenAmount > 0 ? currentValueUsdc / tokenAmount : 0;
+      broadcast("position_update", { tradeId, currentValueUsdc, pnlPct, priceUsd });
+
       // ── Check trigger ────────────────────────────────────────────────────
       let reason: "take_profit" | "stop_loss" | null = null;
       if (takeProfitPercent !== null && pnlPct >= takeProfitPercent) reason = "take_profit";
