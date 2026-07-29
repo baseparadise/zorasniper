@@ -73,8 +73,8 @@ function nextZoraKey(): string | undefined {
   return key;
 }
 
-// Small probe amount for price estimation (never actually sent)
-const PROBE_ETH_WEI = parseEther("0.001");
+// USDC address on Base used for sell-direction value probes in the TP/SL monitor
+// (defined early so fetchCurrentValueUsdc can reference it before USDC_BASE below)
 
 export interface TradeParams {
   tokenAddress: Address;
@@ -608,34 +608,36 @@ async function executeZoraSwapTx(params: {
 }
 
 /**
- * Probe current token price (ETH per token) via the Zora Quote API.
- * Returns null if the price cannot be determined (new pool, API issue, etc.).
+ * Fetch the current USDC value of a given token amount via a sell-direction quote.
  *
- * Strategy:
- * 1. Tiny buy quote (PROBE_ETH_WEI → token) — parse amountOut from response
- *    if the API returns it (field names vary by API version).
- * 2. Fallback: GET /coin endpoint for indexed price data.
+ * This replaces the old buy-probe approach (PROBE_ETH_WEI → token). The key insight:
+ * - Old: simulate buying 0.001 ETH worth of tokens → derive price per token
+ *   Problem: tiny probe amount causes huge price impact → price 31x off from reality.
+ * - New: simulate selling the ACTUAL token balance → get USDC out directly.
+ *   Result: answers the real question ("what is my position worth right now?")
+ *   with no assumptions, no price-impact error, no ETH/USDC conversion needed.
  *
- * NOTE: For very new tokens (< few blocks old), both probes may return null.
- * The monitor loop simply skips the cycle and retries — this is expected
- * behaviour and will self-resolve as the pool gets indexed.
+ * Returns null if the pool has no liquidity or the API cannot find a route.
+ * Expected for very new tokens (< few blocks old); caller should skip and retry.
  */
-async function fetchZoraPriceProbe(
+async function fetchCurrentValueUsdc(
   tokenAddress: string,
+  tokenAmountWei: bigint,
   sender: string,
 ): Promise<number | null> {
+  if (tokenAmountWei === 0n) return 0;
+
   const headers: Record<string, string> = { "Content-Type": "application/json" };
   const _apiKey = nextZoraKey();
   if (_apiKey) headers["x-api-key"] = _apiKey;
 
-  // ── Strategy 1: buy-direction probe ──────────────────────────────────────
   try {
     const body = JSON.stringify({
       chainId: base.id,
-      tokenIn: { type: "eth" },
-      tokenOut: { type: "erc20", address: tokenAddress.toLowerCase() },
-      amountIn: PROBE_ETH_WEI.toString(),
-      slippage: 0.5, // generous — probe only, not executed
+      tokenIn: { type: "erc20", address: tokenAddress.toLowerCase() },
+      tokenOut: { type: "erc20", address: USDC_BASE.toLowerCase() },
+      amountIn: tokenAmountWei.toString(),
+      slippage: 0.5,
       sender: sender.toLowerCase(),
       recipient: sender.toLowerCase(),
     });
@@ -644,64 +646,14 @@ async function fetchZoraPriceProbe(
 
     if (res.ok) {
       const data = await res.json();
-      // Zora API returns amountOut inside the `quote` sub-object
       const amountOutStr: string | undefined = data.quote?.amountOut;
-
-      if (amountOutStr) {
-        const tokens = parseFloat(formatUnits(BigInt(amountOutStr), 18));
-        if (tokens > 0) {
-          return parseFloat(formatEther(PROBE_ETH_WEI)) / tokens;
-        }
+      if (amountOutStr && amountOutStr !== "0") {
+        const usdcValue = parseFloat(formatUnits(BigInt(amountOutStr), USDC_DECIMALS));
+        if (usdcValue > 0) return usdcValue;
       }
     }
   } catch (err) {
-    logger.warn({ err, tokenAddress }, "Zora price probe (buy-quote path) failed");
-  }
-
-  // ── Strategy 2: /coin indexed price → convert USDC price to ETH ──────────
-  try {
-    const coinRes = await fetch(
-      `${ZORA_QUOTE_API}/coin?chainId=${base.id}&address=${tokenAddress.toLowerCase()}`,
-    );
-    if (coinRes.ok) {
-      const coinData = await coinRes.json();
-      // Zora API: price lives at zora20Token.tokenPrice.priceInUsdc
-      const priceInUsdc: string | undefined =
-        coinData?.zora20Token?.tokenPrice?.priceInUsdc;
-
-      if (priceInUsdc) {
-        const tokenPriceUsdc = parseFloat(priceInUsdc);
-        if (tokenPriceUsdc > 0) {
-          // Derive ETH price: probe 1 ETH → USDC to get current ETH/USDC rate
-          const ethUsdcRes = await fetch(`${ZORA_QUOTE_API}/quote`, {
-            method: "POST",
-            headers,
-            body: JSON.stringify({
-              chainId: base.id,
-              tokenIn: { type: "eth" },
-              tokenOut: { type: "erc20", address: USDC_BASE.toLowerCase() },
-              amountIn: parseEther("1").toString(),
-              slippage: 0.5,
-              sender: sender.toLowerCase(),
-              recipient: sender.toLowerCase(),
-            }),
-          });
-          if (ethUsdcRes.ok) {
-            const ethUsdcData = await ethUsdcRes.json();
-            const usdcPerEthStr: string | undefined =
-              ethUsdcData.quote?.amountOut;
-            if (usdcPerEthStr) {
-              const usdcPerEth = parseFloat(formatUnits(BigInt(usdcPerEthStr), USDC_DECIMALS));
-              if (usdcPerEth > 0) {
-                return tokenPriceUsdc / usdcPerEth; // ETH per token
-              }
-            }
-          }
-        }
-      }
-    }
-  } catch (err) {
-    logger.warn({ err, tokenAddress }, "Zora price probe (coin endpoint) failed");
+    logger.warn({ err, tokenAddress }, "fetchCurrentValueUsdc: sell quote failed");
   }
 
   return null;
@@ -1153,12 +1105,34 @@ export async function executeBuy(params: TradeParams): Promise<void> {
       logger.warn({ tokenAddress, err: err instanceof Error ? err.message : String(err) }, "balanceOf diff failed — token amount left blank");
     }
 
-    // Calculate entry price: ETH spent ÷ tokens received
-    // tokenAmount is already a decimal string from formatUnits (e.g. "1.0"), so
-    // parse it directly — BigInt() cannot handle decimal strings and would throw.
-    const tokensNum = tokenAmount ? parseFloat(tokenAmount) : 0;
-    const ethNum = parseFloat(buyAmountEth);
-    const entryPriceEth = tokensNum > 0 ? (ethNum / tokensNum).toFixed(18) : null;
+    // ── Step 7: Fetch entry USDC value via sell quote ────────────────────────
+    // Ask "if I sold all tokens right now, how much USDC would I get?"
+    // This is the true cost basis: accounts for price impact and fees already
+    // paid during the buy. entryPriceEth (ETH_spent / tokens) over-estimates
+    // entry because it includes slippage you already lost.
+    let entryValueUsdc: string | null = null;
+    let receivedWei = 0n;
+    try {
+      const balAfterFinal = await publicClient.readContract({
+        address: tokenAddress,
+        abi: ERC20_ABI,
+        functionName: "balanceOf",
+        args: [account.address],
+      });
+      receivedWei = balAfterFinal > balBeforeBuy ? balAfterFinal - balBeforeBuy : 0n;
+    } catch { /* non-fatal */ }
+
+    if (receivedWei > 0n) {
+      try {
+        const usdcVal = await fetchCurrentValueUsdc(tokenAddress, receivedWei, account.address);
+        if (usdcVal !== null) {
+          entryValueUsdc = usdcVal.toFixed(6);
+          logger.info({ entryValueUsdc, tokenAddress }, "Entry USDC value measured via sell quote");
+        }
+      } catch (err) {
+        logger.warn({ err }, "Failed to fetch entry USDC value — TP/SL will be skipped");
+      }
+    }
 
     const success = receipt.status === "success";
     const [updated] = await db
@@ -1169,7 +1143,7 @@ export async function executeBuy(params: TradeParams): Promise<void> {
         gasUsedEth,
         tokenAmount: tokenAmount || null,
         blockNumber: Number(receipt.blockNumber),
-        entryPriceEth: success ? entryPriceEth : null,
+        entryValueUsdc: success ? entryValueUsdc : null,
       })
       .where(eq(tradesTable.id, tradeRow.id))
       .returning();
@@ -1189,11 +1163,11 @@ export async function executeBuy(params: TradeParams): Promise<void> {
 
       // ── Start sniper TP/SL monitor (Zora API) — only for sniper trades.
       // Manual trades have their own Li.Fi-based monitor in routes/manual.ts.
-      if ((takeProfitPercent || stopLossPercent) && entryPriceEth) {
+      if ((takeProfitPercent || stopLossPercent) && entryValueUsdc) {
         monitorTpSlSniper(
           tradeRow.id,
           tokenAddress,
-          parseFloat(entryPriceEth),
+          parseFloat(entryValueUsdc),
           takeProfitPercent ?? null,
           stopLossPercent ?? null,
           slippagePercent,
@@ -1202,7 +1176,7 @@ export async function executeBuy(params: TradeParams): Promise<void> {
           logger.error({ err, tradeId: tradeRow.id }, "Sniper TP/SL monitor error"),
         );
         logger.info(
-          { tradeId: tradeRow.id, takeProfitPercent, stopLossPercent, entryPriceEth },
+          { tradeId: tradeRow.id, takeProfitPercent, stopLossPercent, entryValueUsdc },
           "Sniper TP/SL monitor started (Zora API)",
         );
       }
@@ -1265,7 +1239,7 @@ export function getWalletAddress(): string | null {
 export async function monitorTpSlSniper(
   tradeId: number,
   tokenAddress: Address,
-  entryPriceEth: number,
+  entryValueUsdc: number,
   takeProfitPercent: number | null,
   stopLossPercent: number | null,
   slippagePercent: number,
@@ -1273,14 +1247,9 @@ export async function monitorTpSlSniper(
 ): Promise<void> {
   if (!takeProfitPercent && !stopLossPercent) return;
 
-  const tpPrice =
-    takeProfitPercent != null ? entryPriceEth * (1 + takeProfitPercent / 100) : null;
-  const slPrice =
-    stopLossPercent != null ? entryPriceEth * (1 - stopLossPercent / 100) : null;
-
   logger.info(
-    { tradeId, entryPriceEth, tpPrice, slPrice, takeProfitPercent, stopLossPercent },
-    "Sniper TP/SL monitor started (Zora API)",
+    { tradeId, entryValueUsdc, takeProfitPercent, stopLossPercent },
+    "Sniper TP/SL monitor started — tracking position value in USDC",
   );
 
   const account = privateKeyToAccount(getWalletKey());
@@ -1309,24 +1278,45 @@ export async function monitorTpSlSniper(
         return;
       }
 
-      // ── Price probe via Zora API ─────────────────────────────────────────
-      const currentPrice = await fetchZoraPriceProbe(tokenAddress, account.address);
+      // ── Read current token balance then get sell quote → USDC value ──────
+      // Selling the actual token balance gives the real position value with
+      // correct price impact — no ETH/USDC rate conversion needed.
+      const tokenBalance = await publicClient.readContract({
+        address: tokenAddress,
+        abi: ERC20_ABI,
+        functionName: "balanceOf",
+        args: [account.address],
+      });
 
-      if (currentPrice === null) {
-        // Expected for very new tokens; pool needs a few more blocks to be indexed
+      if (tokenBalance === 0n) {
+        logger.warn({ tradeId }, "Sniper TP/SL: zero balance — position already closed externally");
+        await db
+          .update(tradesTable)
+          .set({ status: "sold", failReason: "Balance zero during TP/SL monitor" })
+          .where(eq(tradesTable.id, tradeId));
+        return;
+      }
+
+      const currentValueUsdc = await fetchCurrentValueUsdc(tokenAddress, tokenBalance, account.address);
+
+      if (currentValueUsdc === null) {
         logger.debug(
           { tradeId, tokenAddress },
-          "Sniper TP/SL: price probe null — pool may still be initialising, retrying",
+          "Sniper TP/SL: USDC value probe null — pool may still be initialising, retrying",
         );
         continue;
       }
 
-      logger.debug({ tradeId, currentPrice, tpPrice, slPrice }, "Sniper TP/SL price check");
+      const pnlPct = ((currentValueUsdc - entryValueUsdc) / entryValueUsdc) * 100;
+      logger.debug(
+        { tradeId, currentValueUsdc, entryValueUsdc, pnlPct: pnlPct.toFixed(2) },
+        "Sniper TP/SL value check",
+      );
 
       // ── Check trigger ────────────────────────────────────────────────────
       let reason: "take_profit" | "stop_loss" | null = null;
-      if (tpPrice !== null && currentPrice >= tpPrice) reason = "take_profit";
-      else if (slPrice !== null && currentPrice <= slPrice) reason = "stop_loss";
+      if (takeProfitPercent !== null && pnlPct >= takeProfitPercent) reason = "take_profit";
+      else if (stopLossPercent !== null && pnlPct <= -stopLossPercent) reason = "stop_loss";
 
       if (!reason) continue;
 
@@ -1352,26 +1342,11 @@ export async function monitorTpSlSniper(
 
       active = false;
       logger.info(
-        { tradeId, reason, currentPrice, tpPrice, slPrice },
+        { tradeId, reason, currentValueUsdc, entryValueUsdc, pnlPct: pnlPct.toFixed(2) },
         "Sniper TP/SL triggered — executing sell via Zora API",
       );
 
-      // ── Read current token balance ────────────────────────────────────────
-      const tokenBalance = await publicClient.readContract({
-        address: tokenAddress,
-        abi: ERC20_ABI,
-        functionName: "balanceOf",
-        args: [account.address],
-      });
-
-      if (tokenBalance === 0n) {
-        logger.warn({ tradeId }, "Sniper TP/SL: zero balance — position already closed externally");
-        await db
-          .update(tradesTable)
-          .set({ status: "sold", failReason: "Balance zero at TP/SL trigger" })
-          .where(eq(tradesTable.id, tradeId));
-        return;
-      }
+      // tokenBalance already read above for the value probe — reuse it here.
 
       // ── Execute sell via Zora API ────────────────────────────────────────
       try {
@@ -1446,8 +1421,10 @@ export async function recoverSniperTpSlMonitors(): Promise<void> {
         ),
       );
 
+    // Only recover trades that have entryValueUsdc — older trades without it
+    // cannot use the value-based monitor and will be left as-is.
     const recoverable = openTrades.filter(
-      (t) => (t.takeProfitPercent || t.stopLossPercent) && t.entryPriceEth,
+      (t) => (t.takeProfitPercent || t.stopLossPercent) && t.entryValueUsdc,
     );
 
     if (recoverable.length === 0) {
@@ -1461,14 +1438,14 @@ export async function recoverSniperTpSlMonitors(): Promise<void> {
     const config = await loadConfig();
 
     for (const trade of recoverable) {
-      const entryPrice = parseFloat(trade.entryPriceEth!);
+      const entryValueUsdc = parseFloat(trade.entryValueUsdc!);
       const tp = trade.takeProfitPercent ? parseFloat(trade.takeProfitPercent) : null;
       const sl = trade.stopLossPercent ? parseFloat(trade.stopLossPercent) : null;
 
       monitorTpSlSniper(
         trade.id,
         trade.tokenAddress as Address,
-        entryPrice,
+        entryValueUsdc,
         tp,
         sl,
         config.slippagePercent,
@@ -1478,7 +1455,7 @@ export async function recoverSniperTpSlMonitors(): Promise<void> {
       );
 
       logger.info(
-        { tradeId: trade.id, token: trade.tokenAddress, tp, sl },
+        { tradeId: trade.id, token: trade.tokenAddress, tp, sl, entryValueUsdc },
         "Sniper TP/SL monitor recovered",
       );
     }
