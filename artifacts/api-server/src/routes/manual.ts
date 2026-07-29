@@ -10,7 +10,7 @@ import {
   type Address,
   type Account,
 } from "viem";
-import { getLiFiQuote, ensureApproval, ETH_ADDRESS, type LiFiQuoteResponse } from "../lib/lifi";
+import { getLiFiQuote, ETH_ADDRESS } from "../lib/lifi";
 import { base } from "viem/chains";
 import { privateKeyToAccount } from "viem/accounts";
 import { db, tradesTable, type Trade } from "@workspace/db";
@@ -87,8 +87,6 @@ function toBigIntSafe(s: string | null | undefined, fallback = 0n): bigint {
 
 const ZORA_QUOTE_API = "https://api-sdk.zora.engineering";
 
-// Permit2 universal contract address (same on all EVM chains)
-const PERMIT2_ADDRESS = "0x000000000022D473030F116dDEE9F6B43aC78BA3" as Address;
 
 // Supports multiple keys via ZORA_API_KEYS (comma-separated) or ZORA_API_KEY.
 const ZORA_API_KEYS: string[] = (() => {
@@ -152,74 +150,11 @@ interface ZoraCall {
   value: string;
 }
 
-interface ZoraPermit {
-  permit: {
-    details: {
-      token: string;
-      amount: string;
-      expiration: number;
-      nonce: number;
-    };
-    spender: string;
-    sigDeadline: string;
-  };
-  /** Placeholder string returned by Zora API — must be replaced with actual EIP-712 sig. */
-  signature: string;
-}
-
 interface ZoraQuoteResult {
   call: ZoraCall;
   /** Raw token amount out (string, 18 decimals) from the API response. May be
    *  undefined if the API does not include it in this version. */
   amountOut: string | null;
-}
-
-/**
- * Injects a signed Permit2 signature into Zora API calldata.
- *
- * The Zora API returns sell calldata with a literal ASCII placeholder
- * "REPLACE_WITH_PERMIT_SIGNATURE_1" where the 65-byte EIP-712 signature
- * must be inserted.  The slot is always exactly 128 bytes (256 hex chars):
- *   - 32 bytes = inner length prefix (0x41 = 65) — ABI-encodes the bytes value
- *   - 65 bytes = signature data
- *   - 31 bytes = zero-padding to next 32-byte boundary
- *   Total: 128 bytes = 256 hex chars
- *
- * IMPORTANT: the 256-char slot is NOT all zeros after the placeholder.
- * Words 3–4 of the slot may contain non-zero bytes (e.g. 0x60 offset and
- * token address from other encoding layers).  The slot must be replaced in
- * full using a fixed offset, NOT with a while-zero-skip loop.
- */
-function injectPermitSignature(callDataHex: string, signature: `0x${string}`): string {
-  const PLACEHOLDER = "REPLACE_WITH_PERMIT_SIGNATURE_1";
-  const idx = callDataHex.indexOf(PLACEHOLDER);
-  if (idx === -1) {
-    throw new Error("injectPermitSignature: placeholder not found in calldata — API response format may have changed");
-  }
-  const sigHex = signature.slice(2); // 130 hex chars (65 bytes)
-  if (sigHex.length !== 130) {
-    throw new Error(`injectPermitSignature: unexpected signature length ${sigHex.length} (expected 130 hex chars)`);
-  }
-  const lengthPrefix = "0000000000000000000000000000000000000000000000000000000000000041"; // 64 chars
-  const zeroPad = "0".repeat(62); // 31 bytes padding → 62 chars
-  const encodedSig = lengthPrefix + sigHex + zeroPad; // 256 chars total
-
-  // The slot occupies exactly SLOT_CHARS = 256 hex chars starting at idx.
-  // We must NOT use a while-zero-skip loop: the last two 32-byte words of the
-  // slot contain non-zero bytes (0x60 offset pointer and the token address from
-  // the inner encoding), so a zero-skip would stop far too early and GROW the
-  // calldata by 33 bytes — corrupting every ABI offset that follows.
-  const SLOT_CHARS = 256;
-  const slotEnd = idx + SLOT_CHARS;
-
-  if (slotEnd > callDataHex.length) {
-    throw new Error(
-      `injectPermitSignature: slot extends beyond calldata end ` +
-      `(idx=${idx}, slotEnd=${slotEnd}, len=${callDataHex.length})`,
-    );
-  }
-
-  return callDataHex.slice(0, idx) + encodedSig + callDataHex.slice(slotEnd);
 }
 
 /**
@@ -809,399 +744,36 @@ async function runBuy(
 // ── Market sell helpers ───────────────────────────────────────────────────
 
 /**
- * Sell tokens via Li.Fi (token → ETH swap through the best available DEX route).
- * Throws on any failure so the caller can handle the error.
- */
-async function runLiFiSell(
-  tradeId: number,
-  tokenAddress: Address,
-  rawBal: bigint,
-  buyAmountEth: string,
-  slippagePercent: number = 10,
-): Promise<void> {
-  const publicClient = makePublicClient();
-  const account = privateKeyToAccount(getWalletKey());
-  const walletClient = createWalletClient({ account, chain: base, transport: http(getHttpRpcUrl()) });
-
-  const sellQuote = await getLiFiQuote(
-    tokenAddress,
-    ETH_ADDRESS,
-    rawBal,
-    account.address,
-    slippagePercent,
-  );
-
-  // NOTE: pass full `account` object (not account.address) so viem can sign the approval tx
-  if (sellQuote.estimate.approvalAddress) {
-    await ensureApproval(
-      publicClient,
-      walletClient,
-      account,
-      tokenAddress,
-      sellQuote.estimate.approvalAddress as Address,
-      rawBal,
-    );
-  }
-
-  // ── EIP-1559 gas — explicit fees to prevent Alchemy "invalid params" error ──
-  const { transactionRequest: sellTx } = sellQuote;
-  let liFiMaxFeePerGas: bigint | undefined;
-  let liFiMaxPriorityFeePerGas: bigint | undefined;
-  try {
-    const fees = await publicClient.estimateFeesPerGas();
-    liFiMaxFeePerGas = fees.maxFeePerGas;
-    liFiMaxPriorityFeePerGas = fees.maxPriorityFeePerGas < fees.maxFeePerGas
-      ? fees.maxPriorityFeePerGas
-      : fees.maxFeePerGas;
-  } catch { /* let viem fall back to its own estimation */ }
-
-  const hash = await walletClient.sendTransaction({
-    to: sellTx.to as Address,
-    data: sellTx.data as `0x${string}`,
-    value: BigInt(sellTx.value || "0"),
-    gas: sellTx.gasLimit ? BigInt(sellTx.gasLimit) : undefined,
-    maxFeePerGas: liFiMaxFeePerGas,
-    maxPriorityFeePerGas: liFiMaxPriorityFeePerGas,
-    account,
-    chain: base,
-  });
-
-  logger.info({ tradeId, hash }, "Li.Fi sell tx submitted");
-  const receipt = await publicClient.waitForTransactionReceipt({ hash });
-
-  if (receipt.status !== "success") {
-    throw new Error("Li.Fi sell tx reverted on-chain");
-  }
-
-  const ethRecovered = sellQuote.estimate.toAmountMin
-    ? formatEther(BigInt(sellQuote.estimate.toAmountMin))
-    : "0";
-  const pnl = (parseFloat(ethRecovered) - parseFloat(buyAmountEth)).toFixed(6);
-
-  await db
-    .update(tradesTable)
-    .set({ status: "sold", sellTxHash: hash, sellAmountEth: ethRecovered, pnlEth: pnl })
-    .where(eq(tradesTable.id, tradeId));
-
-  logger.info({ tradeId, pnl, ethRecovered, hash }, "Market sell confirmed via Li.Fi");
-}
-
-/**
- * Sell tokens via Zora Quote API (token → USDC), identical to sniper logic.
- * USDC routing is more reliable than ETH for Zora Coins whose pools pair
- * against a creator coin rather than WETH directly.
- * Uses the same EIP-1559 gas handling as the Zora buy path.
- *
- * The Zora API returns sell calldata with a Permit2 EIP-712 placeholder
- * ("REPLACE_WITH_PERMIT_SIGNATURE_1") that must be signed and injected before
- * the tx is submitted. This function handles that automatically.
- *
- * Throws on any failure so the caller can fall back to Li.Fi.
- */
-async function runZoraSell(
-  tradeId: number,
-  tokenAddress: Address,
-  rawBal: bigint,
-  buyAmountEth: string,
-): Promise<void> {
-  const account = privateKeyToAccount(getWalletKey());
-  const httpUrl = getHttpRpcUrl();
-  const publicClient = createPublicClient({ chain: base, transport: http(httpUrl) });
-  const walletClient = createWalletClient({ account, chain: base, transport: http(httpUrl) });
-
-  // Load config for gas cap — sensible default if config unavailable
-  let maxGasGwei = 10;
-  try {
-    const config = await loadConfig();
-    maxGasGwei = config.maxGasGwei;
-  } catch { /* proceed with default */ }
-
-  // ── Snapshot USDC balance before sell (same as sniper) ───────────────────
-  const usdcBefore = await publicClient.readContract({
-    address: USDC_BASE,
-    abi: ERC20_ABI,
-    functionName: "balanceOf",
-    args: [account.address],
-  });
-
-  // ── Fetch Zora sell quote: token → USDC (with retry, same as sniper) ─────
-  const _apiKey = nextZoraKey();
-  const headers: Record<string, string> = { "Content-Type": "application/json" };
-  if (_apiKey) headers["x-api-key"] = _apiKey;
-
-  const quoteBody = JSON.stringify({
-    chainId: base.id,
-    tokenIn: { type: "erc20", address: tokenAddress.toLowerCase() },
-    tokenOut: { type: "erc20", address: USDC_BASE.toLowerCase() },
-    amountIn: rawBal.toString(),
-    slippage: 0.1, // 10% for sells
-    sender: account.address.toLowerCase(),
-    recipient: account.address.toLowerCase(),
-  });
-
-  let rawCall: ZoraCall | null = null;
-  let permits: ZoraPermit[] = [];
-
-  for (let attempt = 1; attempt <= 3; attempt++) {
-    const res = await fetch(`${ZORA_QUOTE_API}/quote`, { method: "POST", headers, body: quoteBody });
-    if (!res.ok) {
-      const text = await res.text().catch(() => "");
-      // Detect "SwapError: Failed to get quote" — no point retrying, surface immediately
-      const isNoRoute =
-        text.includes("SwapError") ||
-        text.includes("Failed to get quote") ||
-        (res.status === 400 && text.includes("UNKNOWN"));
-      if (isNoRoute) {
-        throw new Error(`ZoraNoRoute: ${text.slice(0, 200)}`);
-      }
-      if (attempt < 3) {
-        logger.warn({ tradeId, attempt, status: res.status, body: text.slice(0, 100) }, "Zora sell quote failed, retry in 5s");
-        await new Promise(r => setTimeout(r, 5_000));
-        continue;
-      }
-      throw new Error(`Zora sell quote HTTP ${res.status}: ${text.slice(0, 200)}`);
-    }
-    const data = await res.json();
-    if (!data.call) {
-      // API returned 200 but with an error payload — treat as no-route
-      if (data.success === false || data.success === "false" || data.error) {
-        throw new Error(`ZoraNoRoute: ${JSON.stringify(data).slice(0, 200)}`);
-      }
-      if (attempt < 3) {
-        logger.warn({ tradeId, attempt, data }, "Zora sell quote: no call field, retry in 5s");
-        await new Promise(r => setTimeout(r, 5_000));
-        continue;
-      }
-      throw new Error(`Zora sell quote returned no call: ${JSON.stringify(data).slice(0, 200)}`);
-    }
-    // Guard: amountOut "0" means the route has no liquidity (e.g. token pools against a
-    // creator coin rather than WETH/USDC). Throw so the caller falls back to Li.Fi.
-    const amountOut: string | null = data.quote?.amountOut ?? null;
-    if (amountOut === "0") {
-      logger.warn({ tradeId, amountOut }, "Zora sell quote: amountOut is 0 — no liquidity, falling back");
-      throw new Error("ZoraNoRoute: amountOut is 0 (pool has no liquidity for this route)");
-    }
-
-    rawCall = data.call as ZoraCall;
-    permits = Array.isArray(data.permits) ? data.permits : [];
-    logger.info({ tradeId, amountOut }, "Zora sell quote amountOut ok");
-    break;
-  }
-
-  if (!rawCall) throw new Error("Zora sell quote failed after 3 attempts");
-
-  logger.info({ tradeId, target: rawCall.target, permitsCount: permits.length }, "Zora sell quote OK");
-
-  // ── Handle Permit2 if the API returned permit data ────────────────────────
-  //
-  // The Zora API builds sell calldata using Permit2. When permits are returned,
-  // `call.data` contains "REPLACE_WITH_PERMIT_SIGNATURE_1" which must be replaced
-  // with a signed EIP-712 Permit2 message. Approval goes to Permit2, not the router.
-  let call = rawCall;
-
-  if (permits.length > 0) {
-    logger.info({ tradeId, permitsCount: permits.length }, "Signing Permit2 for Zora sell");
-
-    // Approve Permit2 contract to spend tokens (if not already sufficient)
-    const permit2Allowance = await publicClient.readContract({
-      address: tokenAddress,
-      abi: ERC20_ABI,
-      functionName: "allowance",
-      args: [account.address, PERMIT2_ADDRESS],
-    });
-    if (permit2Allowance < rawBal) {
-      logger.info({ tradeId, spender: PERMIT2_ADDRESS }, "Approving Permit2 contract for sell");
-      const approveTx = await walletClient.writeContract({
-        address: tokenAddress,
-        abi: ERC20_ABI,
-        functionName: "approve",
-        args: [PERMIT2_ADDRESS, maxUint256],
-        chain: base,
-        account,
-      });
-      await publicClient.waitForTransactionReceipt({ hash: approveTx, timeout: 60_000 });
-      logger.info({ tradeId, approveTx }, "Permit2 approval confirmed");
-    }
-
-    // Sign each permit and inject signature into calldata
-    let callData = rawCall.data;
-    for (const p of permits) {
-      const sig = await walletClient.signTypedData({
-        account,
-        domain: {
-          name: "Permit2",
-          chainId: base.id,
-          verifyingContract: PERMIT2_ADDRESS,
-        },
-        types: {
-          PermitDetails: [
-            { name: "token", type: "address" },
-            { name: "amount", type: "uint160" },
-            { name: "expiration", type: "uint48" },
-            { name: "nonce", type: "uint48" },
-          ],
-          PermitSingle: [
-            { name: "details", type: "PermitDetails" },
-            { name: "spender", type: "address" },
-            { name: "sigDeadline", type: "uint256" },
-          ],
-        },
-        primaryType: "PermitSingle",
-        message: {
-          details: {
-            token: p.permit.details.token as Address,
-            amount: BigInt(p.permit.details.amount),
-            expiration: p.permit.details.expiration,
-            nonce: p.permit.details.nonce,
-          },
-          spender: p.permit.spender as Address,
-          sigDeadline: BigInt(p.permit.sigDeadline),
-        },
-      });
-      callData = injectPermitSignature(callData, sig);
-      logger.info({ tradeId, sigLength: sig.length }, "Permit2 signature injected into calldata");
-    }
-    call = { ...rawCall, data: callData };
-  } else {
-    // No permits — use traditional approve(router, maxUint256) path
-    const routerAddress = toHex(rawCall.target) as Address;
-    const allowance = await publicClient.readContract({
-      address: tokenAddress,
-      abi: ERC20_ABI,
-      functionName: "allowance",
-      args: [account.address, routerAddress],
-    });
-    if (allowance < rawBal) {
-      logger.info({ tradeId, spender: routerAddress }, "Approving Zora router for sell");
-      const approveTx = await walletClient.writeContract({
-        address: tokenAddress,
-        abi: ERC20_ABI,
-        functionName: "approve",
-        args: [routerAddress, maxUint256],
-        chain: base,
-        account,
-      });
-      await publicClient.waitForTransactionReceipt({ hash: approveTx, timeout: 60_000 });
-      logger.info({ tradeId, approveTx }, "Zora sell approval confirmed");
-    }
-  }
-
-  const routerAddress = toHex(call.target) as Address;
-
-  // ── Simulate (warning-only — Zora router can revert in eth_call) ─────────
-  try {
-    await publicClient.call({
-      to: routerAddress,
-      data: toHex(call.data),
-      value: toBigIntSafe(call.value),
-      account: account.address,
-    });
-    logger.info({ tradeId }, "Zora sell simulation passed");
-  } catch (simErr) {
-    const msg = simErr instanceof Error ? simErr.message.slice(0, 200) : String(simErr);
-    logger.warn({ tradeId, msg }, "Zora sell simulation warning — proceeding");
-  }
-
-  // ── EIP-1559 gas with cap ─────────────────────────────────────────────────
-  const maxFeeCapWei = BigInt(Math.round(maxGasGwei * 1e9));
-  let feeEstimate: { maxFeePerGas: bigint; maxPriorityFeePerGas: bigint };
-  let estimatedGas: bigint;
-  try {
-    const [fees, gas] = await Promise.all([
-      publicClient.estimateFeesPerGas(),
-      publicClient.estimateGas({
-        to: routerAddress,
-        data: toHex(call.data),
-        value: toBigIntSafe(call.value),
-        account: account.address,
-      }),
-    ]);
-    feeEstimate = fees;
-    estimatedGas = gas;
-  } catch (gasErr) {
-    logger.warn({ tradeId, err: gasErr }, "Zora sell gas estimation failed — using 500k fallback");
-    feeEstimate = await publicClient.estimateFeesPerGas();
-    estimatedGas = 500_000n;
-  }
-  const maxFeePerGas = feeEstimate.maxFeePerGas < maxFeeCapWei
-    ? feeEstimate.maxFeePerGas
-    : maxFeeCapWei;
-  const maxPriorityFeePerGas = feeEstimate.maxPriorityFeePerGas < maxFeePerGas
-    ? feeEstimate.maxPriorityFeePerGas
-    : maxFeePerGas;
-  const gasLimit = (estimatedGas * 120n) / 100n;
-
-  logger.info(
-    { tradeId, estimatedGas: estimatedGas.toString(), maxFeePerGas: maxFeePerGas.toString() },
-    "Zora sell: gas estimated",
-  );
-
-  // ── Send tx ───────────────────────────────────────────────────────────────
-  const txHash = await walletClient.sendTransaction({
-    to: routerAddress,
-    data: toHex(call.data),
-    value: toBigIntSafe(call.value),
-    chain: base,
-    account,
-    gas: gasLimit,
-    maxFeePerGas,
-    maxPriorityFeePerGas,
-  });
-
-  logger.info({ tradeId, txHash }, "Zora sell tx submitted");
-  const receipt = await publicClient.waitForTransactionReceipt({ hash: txHash, timeout: 60_000 });
-
-  if (receipt.status !== "success") {
-    throw new Error(`Zora sell tx reverted on-chain: ${txHash}`);
-  }
-
-  const gasUsedEth = formatEther(receipt.gasUsed * (receipt.effectiveGasPrice ?? maxFeePerGas));
-
-  // ── Calculate USDC received via balance diff (same as sniper) ────────────
-  const usdcAfter = await publicClient.readContract({
-    address: USDC_BASE,
-    abi: ERC20_ABI,
-    functionName: "balanceOf",
-    args: [account.address],
-  });
-  const usdcReceived = usdcAfter > usdcBefore ? usdcAfter - usdcBefore : 0n;
-  // sellAmountEth stores USDC received (6 decimals) — same convention as sniper
-  const sellAmountUsdc = formatUnits(usdcReceived, USDC_DECIMALS);
-
-  await db
-    .update(tradesTable)
-    .set({ status: "sold", sellTxHash: txHash, sellAmountEth: sellAmountUsdc, pnlEth: sellAmountUsdc })
-    .where(eq(tradesTable.id, tradeId));
-
-  logger.info({ tradeId, sellAmountUsdc, gasUsedEth, txHash }, "Zora sell confirmed (token → USDC)");
-}
-
-/**
- * Executes an immediate market sell: tries Zora API first (token → USDC,
- * same as sniper), falls back to Li.Fi if Zora fails for any reason.
- * Updates the trade record to "sold" on success, "confirmed" (with failReason) on total failure.
+ * Execute an immediate market sell.
+ * Delegates to the unified sell function (trader.ts → executeZoraSell):
+ * 0x API (primary) → Li.Fi (fallback).
+ * Both sniper and manual positions use this same path.
  */
 async function runMarketSell(
   tradeId: number,
   tokenAddress: Address,
   rawBal: bigint,
-  buyAmountEth: string,
 ): Promise<void> {
-  // ── Try Zora first (consistent with buy path) ─────────────────────────────
+  let slippagePercent = 10;
+  let maxGasGwei = 10;
   try {
-    await runZoraSell(tradeId, tokenAddress, rawBal, buyAmountEth);
-    return;
-  } catch (zoraErr) {
-    const zoraMsg = (zoraErr instanceof Error ? zoraErr.message : String(zoraErr)).slice(0, 200);
-    logger.warn({ tradeId, zoraMsg }, "Zora sell failed — falling back to Li.Fi");
-  }
+    const config = await loadConfig();
+    slippagePercent = config.slippagePercent;
+    maxGasGwei = config.maxGasGwei;
+  } catch { /* use defaults */ }
 
-  // ── Li.Fi fallback ────────────────────────────────────────────────────────
   try {
-    await runLiFiSell(tradeId, tokenAddress, rawBal, buyAmountEth);
+    await executeZoraSell({
+      tradeId,
+      tokenAddress,
+      tokenBalance: rawBal,
+      slippagePercent,
+      maxGasGwei,
+      reason: "manual_sell",
+    });
   } catch (err) {
     const failReason = (err instanceof Error ? err.message : String(err)).slice(0, 500);
-    logger.error({ err, tradeId, failReason }, "Market sell via Li.Fi also failed");
+    logger.error({ err, tradeId, failReason }, "Market sell failed (0x + Li.Fi both failed)");
     await db
       .update(tradesTable)
       .set({ status: "confirmed", failReason })
@@ -1686,23 +1258,11 @@ router.post("/positions/:id/sell", async (req, res): Promise<void> => {
   // Respond immediately; sell executes in background
   res.status(202).json(trade);
 
-  // Route sell to correct DEX: sniper positions use Zora API; manual positions use Li.Fi
-  if (trade.source === "sniper") {
-    loadConfig().then((config) =>
-      executeZoraSell({
-        tradeId: trade.id,
-        tokenAddress: addr,
-        tokenBalance: rawBal,
-        slippagePercent: config.slippagePercent,
-        maxGasGwei: config.maxGasGwei,
-        reason: "manual_sell",
-      })
-    ).catch((err) => logger.error({ err, tradeId: trade.id }, "Sniper market sell background error"));
-  } else {
-    runMarketSell(trade.id, addr, rawBal, trade.buyAmountEth ?? "0").catch((err) =>
-      logger.error({ err, tradeId: trade.id }, "Market sell background error"),
-    );
-  }
+  // Unified sell path: 0x API (primary) → Li.Fi (fallback)
+  // Same route for both sniper and manual positions.
+  runMarketSell(trade.id, addr, rawBal).catch((err) =>
+    logger.error({ err, tradeId: trade.id }, "Market sell background error"),
+  );
 });
 
 // ── Update TP/SL ───────────────────────────────────────────────────────────

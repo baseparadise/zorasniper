@@ -9,6 +9,7 @@ import {
   type Address,
 } from "viem";
 import { getLiFiQuote, ensureApproval, ETH_ADDRESS } from "../lib/lifi";
+import { get0xSellQuote, ZEROX_NATIVE_ETH } from "../lib/zerox";
 import { base } from "viem/chains";
 import { privateKeyToAccount } from "viem/accounts";
 import { db, tradesTable, creatorsTable } from "@workspace/db";
@@ -98,83 +99,6 @@ interface ZoraCall {
   target: string;
   data: string;
   value: string;
-}
-
-interface ZoraPermit {
-  permit: {
-    details: {
-      token: string;
-      amount: string;
-      expiration: number;
-      nonce: number;
-    };
-    spender: string;
-    sigDeadline: string;
-  };
-  /** Placeholder string returned by Zora API — must be replaced with actual EIP-712 sig. */
-  signature: string;
-}
-
-interface ZoraQuoteResult {
-  call: ZoraCall;
-  permits: ZoraPermit[];
-}
-
-/**
- * Injects a signed Permit2 signature into Zora API calldata.
- *
- * The Zora API returns sell calldata with a literal ASCII placeholder
- * "REPLACE_WITH_PERMIT_SIGNATURE_1" where the 65-byte EIP-712 signature
- * must be inserted.  The slot is always exactly 128 bytes (256 hex chars):
- *   - 32 bytes = inner length prefix (0x41 = 65) — ABI-encodes the bytes value
- *   - 65 bytes = signature data
- *   - 31 bytes = zero-padding to next 32-byte boundary
- *   Total: 128 bytes = 256 hex chars
- *
- * The outer ABI length word (immediately before the placeholder) is set to
- * 0x80 = 128 by the Zora API, meaning the bytes field carries 128 bytes of data —
- * the inner ABI-encoding of the 65-byte signature.
- *
- * IMPORTANT: the 256-char slot is NOT all zeros after the placeholder.
- * Words 3–4 of the slot may contain non-zero bytes (e.g. 0x60 offset and
- * token address from other encoding layers).  The slot must be replaced in
- * full using a fixed offset, NOT with a while-zero-skip loop.
- */
-function injectPermitSignature(callDataHex: string, signature: `0x${string}`): string {
-  const PLACEHOLDER = "REPLACE_WITH_PERMIT_SIGNATURE_1";
-  const idx = callDataHex.indexOf(PLACEHOLDER);
-  if (idx === -1) {
-    throw new Error("injectPermitSignature: placeholder not found in calldata — API response format may have changed");
-  }
-  const sigHex = signature.slice(2); // 130 hex chars (65 bytes)
-  if (sigHex.length !== 130) {
-    throw new Error(`injectPermitSignature: unexpected signature length ${sigHex.length} (expected 130 hex chars)`);
-  }
-
-  // The full ABI-encoded slot is always 128 bytes = 256 hex chars:
-  //   64 chars (32 bytes) = inner length prefix 0x41 = 65
-  //   130 chars (65 bytes) = ECDSA signature
-  //   62 chars (31 bytes) = zero-padding to 32-byte boundary
-  const lengthPrefix = "0000000000000000000000000000000000000000000000000000000000000041"; // 64 chars
-  const zeroPad = "0".repeat(62); // 31 bytes padding → 62 chars
-  const encodedSig = lengthPrefix + sigHex + zeroPad; // 256 chars total
-
-  // The slot occupies exactly SLOT_CHARS = 256 hex chars starting at idx.
-  // We must NOT use a while-zero-skip loop: the last two 32-byte words of the
-  // slot contain non-zero bytes (0x60 offset pointer and the token address from
-  // the inner encoding), so a zero-skip would stop far too early and GROW the
-  // calldata by 33 bytes — corrupting every ABI offset that follows.
-  const SLOT_CHARS = 256;
-  const slotEnd = idx + SLOT_CHARS;
-
-  if (slotEnd > callDataHex.length) {
-    throw new Error(
-      `injectPermitSignature: slot extends beyond calldata end ` +
-      `(idx=${idx}, slotEnd=${slotEnd}, len=${callDataHex.length})`,
-    );
-  }
-
-  return callDataHex.slice(0, idx) + encodedSig + callDataHex.slice(slotEnd);
 }
 
 /**
@@ -295,142 +219,6 @@ async function fetchZoraQuote(params: {
   throw new Error("Zora quote failed after 3 attempts — pool not ready or token invalid");
 }
 
-/** USDC address on Base — primary sell currency (more reliable routing than ETH for Zora content coins). */
-const USDC_BASE = "0x833589fCD6eDb6E08f4c7C32D4f71b54bdA02913" as Address;
-const USDC_DECIMALS = 6;
-
-
-
-/**
- * Generic Zora Quote API caller.
- * tokenIn / tokenOut each follow the Zora API shape:
- *   { type: "eth" } or { type: "erc20", address: "0x..." }
- *
- * permitActiveSeconds: how long the Permit2 signature should stay valid.
- * Defaults to 300 (5 min) — enough for approval + signing + submission.
- * Passing 0 lets the API use its own default (often very short, which
- * causes "execution reverted" during gas estimation if there's any delay).
- *
- * signatures: optional array of pre-signed Permit2 permits.  When provided
- * the API embeds the signatures directly into the returned calldata, so
- * injectPermitSignature() is NOT needed.  Pass after the initial quote
- * round has been signed.
- */
-async function fetchZoraQuoteGeneric(params: {
-  tokenIn: { type: "eth" } | { type: "erc20"; address: string };
-  tokenOut: { type: "eth" } | { type: "erc20"; address: string };
-  amountIn: bigint;
-  slippage: number; // fractional, e.g. 0.05
-  sender: string;
-  label?: string; // log label
-  permitActiveSeconds?: number;
-  signatures?: Array<{ permit: ZoraPermit["permit"]; signature: string }>;
-}): Promise<ZoraQuoteResult> {
-  const {
-    tokenIn,
-    tokenOut,
-    amountIn,
-    slippage,
-    sender,
-    label = "Zora quote",
-    permitActiveSeconds = 300,
-    signatures,
-  } = params;
-  const headers: Record<string, string> = { "Content-Type": "application/json" };
-  const _apiKey = nextZoraKey();
-  if (_apiKey) headers["x-api-key"] = _apiKey;
-
-  const body = JSON.stringify({
-    chainId: base.id,
-    tokenIn,
-    tokenOut,
-    amountIn: amountIn.toString(),
-    slippage,
-    sender: sender.toLowerCase(),
-    recipient: sender.toLowerCase(),
-    permitActiveSeconds,
-    ...(signatures && signatures.length > 0 ? { signatures } : {}),
-  });
-
-  for (let attempt = 1; attempt <= 3; attempt++) {
-    const res = await fetch(`${ZORA_QUOTE_API}/quote`, { method: "POST", headers, body });
-
-    if (!res.ok) {
-      const text = await res.text().catch(() => "");
-      // Detect "SwapError: Failed to get quote" — no point retrying, surface immediately
-      const isNoRoute =
-        text.includes("SwapError") ||
-        text.includes("Failed to get quote") ||
-        (res.status === 400 && text.includes("UNKNOWN"));
-      if (isNoRoute) {
-        throw new Error(`ZoraNoRoute: ${text.slice(0, 200)}`);
-      }
-      if (attempt < 3) {
-        logger.warn({ attempt, status: res.status, body: text.slice(0, 100) }, `${label} attempt ${attempt}/3 failed, retry in 5s`);
-        await new Promise((r) => setTimeout(r, 5_000));
-        continue;
-      }
-      throw new Error(`${label} HTTP ${res.status}: ${text.slice(0, 200)}`);
-    }
-
-    const data = await res.json();
-    if (!data.call) {
-      // API may return success as a string "true"/"false" or as a boolean.
-      if (data.success === false || data.success === "false" || data.error) {
-        // API returned 200 but with an error payload — treat as no-route
-        throw new Error(`ZoraNoRoute: ${JSON.stringify(data).slice(0, 200)}`);
-      }
-      if (attempt < 3) {
-        logger.warn({ attempt, data }, `${label} attempt ${attempt}/3 — no call, retry in 5s`);
-        await new Promise((r) => setTimeout(r, 5_000));
-        continue;
-      }
-      throw new Error(`${label} returned no call: ${JSON.stringify(data).slice(0, 200)}`);
-    }
-
-    // Guard: if amountOut is "0" the route exists but has no liquidity (common for
-    // tokens whose pool pairs against a creator coin rather than WETH/USDC).
-    // Throw ZoraNoRoute so the caller falls back to Uniswap V4 or Li.Fi.
-    const amountOut: string | null = data.quote?.amountOut ?? null;
-    if (amountOut === "0") {
-      logger.warn({ attempt, label, amountOut }, `${label}: amountOut is 0 — no liquidity on this route, treating as ZoraNoRoute`);
-      throw new Error(`ZoraNoRoute: amountOut is 0 (pool has no liquidity for this route)`);
-    }
-
-    const permits: ZoraPermit[] = Array.isArray(data.permits) ? data.permits : [];
-    logger.info({ attempt, target: data.call.target, permitsCount: permits.length, amountOut }, `${label} OK`);
-    return { call: data.call as ZoraCall, permits };
-  }
-
-  throw new Error(`${label} failed after 3 attempts`);
-}
-
-/**
- * Fetch a SELL quote from Zora Quote API (erc20 → USDC).
- * USDC routing is more reliable than ETH for Zora content coins whose pools
- * pair against a creator coin rather than WETH directly.
- * Throws ZoraNoRoute error (message starts with "ZoraNoRoute:") if the Zora API
- * cannot find a route — the caller can then attempt a two-step sell.
- *
- * Returns both the calldata and the permits array. When permits are non-empty,
- * the calldata contains the placeholder "REPLACE_WITH_PERMIT_SIGNATURE_1" that
- * must be replaced with the signed Permit2 EIP-712 signature before submission.
- */
-async function fetchZoraSellQuote(params: {
-  tokenAddress: string;
-  tokenAmountWei: bigint;
-  slippage: number; // fractional
-  sender: string;
-}): Promise<ZoraQuoteResult> {
-  return fetchZoraQuoteGeneric({
-    tokenIn: { type: "erc20", address: params.tokenAddress.toLowerCase() },
-    tokenOut: { type: "erc20", address: USDC_BASE.toLowerCase() },
-    amountIn: params.tokenAmountWei,
-    slippage: params.slippage,
-    sender: params.sender,
-    label: "Zora sell quote (→USDC)",
-  });
-}
 
 /**
  * Execute a single Zora swap transaction: approve spender → simulate (warn-only)
@@ -675,8 +463,8 @@ async function fetchPositionValueUsdc(
 
 /**
  * Sell a token position.
- * Primary:  Zora Quote API (token → USDC via Permit2).
- * Fallback: Li.Fi (token → ETH) if Zora API cannot find a route.
+ * Primary:  0x API v2 Permit2 (token → ETH via best available DEX route).
+ * Fallback: Li.Fi (token → ETH) if 0x API cannot find a route or fails.
  */
 export async function executeZoraSell(params: {
   tradeId: number;
@@ -687,17 +475,200 @@ export async function executeZoraSell(params: {
   reason: string;
 }): Promise<void> {
   try {
-    await executeZoraSellViaApi(params);
+    await execute0xSellTrade(params);
     return;
-  } catch (zoraErr) {
-    const msg = zoraErr instanceof Error ? zoraErr.message : String(zoraErr);
-    logger.warn({ tradeId: params.tradeId, err: msg }, "Zora API sell failed — falling back to Li.Fi");
+  } catch (zeroxErr) {
+    const msg = zeroxErr instanceof Error ? zeroxErr.message : String(zeroxErr);
+    logger.warn({ tradeId: params.tradeId, err: msg }, "0x API sell failed — falling back to Li.Fi");
   }
   await executeLiFiSell(params);
 }
 
 /**
- * Sell via Li.Fi (token → ETH) — used as fallback when Zora API cannot route.
+ * Execute a sell via 0x API v2 (Permit2).
+ * Handles ERC-20 approval (Permit2 or AllowanceHolder path), EIP-712
+ * signature injection, gas estimation, tx submission, receipt, and
+ * DB update. Throws on any failure so the caller can fall back to Li.Fi.
+ */
+async function execute0xSellTrade(params: {
+  tradeId: number;
+  tokenAddress: Address;
+  tokenBalance: bigint;
+  slippagePercent: number;
+  maxGasGwei: number;
+  reason: string;
+}): Promise<void> {
+  const { tradeId, tokenAddress, tokenBalance, slippagePercent, reason } = params;
+  const slippageBps = Math.round(slippagePercent * 100); // e.g. 5% → 500 bps
+
+  const account = privateKeyToAccount(getWalletKey());
+  const httpUrl = getHttpRpcUrl();
+  const publicClient = createPublicClient({ chain: base, transport: http(httpUrl) });
+  const walletClient = createWalletClient({ account, chain: base, transport: http(httpUrl) });
+
+  const logCtx = { tradeId, reason, method: "0x" };
+  logger.info(logCtx, "execute0xSellTrade: fetching 0x quote");
+
+  // ── Get 0x quote (token → ETH) ───────────────────────────────────────────
+  const quote = await get0xSellQuote({
+    sellToken: tokenAddress,
+    buyToken: ZEROX_NATIVE_ETH,
+    sellAmount: tokenBalance,
+    taker: account.address,
+    slippageBps,
+  });
+
+  const tx = quote.transaction;
+  let txData: `0x${string}` = tx.data as `0x${string}`;
+
+  // ── Permit2 approval + signature ─────────────────────────────────────────
+  if (quote.permit2?.type === "Permit2" && quote.permit2.eip712) {
+    // 1. Ensure token is approved to the Permit2 contract
+    const permit2Allowance = await publicClient.readContract({
+      address: tokenAddress,
+      abi: ERC20_ABI,
+      functionName: "allowance",
+      args: [account.address, PERMIT2_ADDRESS],
+    });
+    if (permit2Allowance < tokenBalance) {
+      logger.info({ ...logCtx, spender: PERMIT2_ADDRESS }, "0x sell: approving Permit2 contract");
+      const approveTx = await walletClient.writeContract({
+        address: tokenAddress,
+        abi: ERC20_ABI,
+        functionName: "approve",
+        args: [PERMIT2_ADDRESS, maxUint256],
+        chain: base,
+        account,
+      });
+      await publicClient.waitForTransactionReceipt({ hash: approveTx, timeout: 60_000 });
+      logger.info({ ...logCtx, approveTx }, "0x sell: Permit2 approval confirmed");
+    }
+
+    // 2. Sign the EIP-712 Permit2 message
+    const eip712 = quote.permit2.eip712;
+    const signature = await walletClient.signTypedData({
+      account,
+      // eslint-disable-next-line @typescript-eslint/no-explicit-any
+      domain: eip712.domain as any,
+      // eslint-disable-next-line @typescript-eslint/no-explicit-any
+      types: eip712.types as any,
+      primaryType: eip712.primaryType,
+      // eslint-disable-next-line @typescript-eslint/no-explicit-any
+      message: eip712.message as any,
+    });
+
+    // 3. Append signature (without 0x prefix) to tx data — 0x v2 convention
+    txData = (tx.data + signature.slice(2)) as `0x${string}`;
+    logger.info({ ...logCtx, sigLength: signature.length }, "0x sell: Permit2 signature appended");
+
+  } else {
+    // AllowanceHolder path — traditional ERC-20 approve(spender, amount)
+    const spenderAddress = (quote.issues?.allowance?.spender ?? tx.to) as Address;
+    if (spenderAddress) {
+      const allowance = await publicClient.readContract({
+        address: tokenAddress,
+        abi: ERC20_ABI,
+        functionName: "allowance",
+        args: [account.address, spenderAddress],
+      });
+      if (allowance < tokenBalance) {
+        logger.info({ ...logCtx, spender: spenderAddress }, "0x sell: approving AllowanceHolder spender");
+        const approveTx = await walletClient.writeContract({
+          address: tokenAddress,
+          abi: ERC20_ABI,
+          functionName: "approve",
+          args: [spenderAddress, maxUint256],
+          chain: base,
+          account,
+        });
+        await publicClient.waitForTransactionReceipt({ hash: approveTx, timeout: 60_000 });
+        logger.info({ ...logCtx, approveTx }, "0x sell: AllowanceHolder approval confirmed");
+      }
+    }
+  }
+
+  // ── Gas estimation ───────────────────────────────────────────────────────
+  const fees = await publicClient.estimateFeesPerGas();
+  const txValue = toBigIntSafe(tx.value);
+
+  let estimatedGas: bigint;
+  try {
+    estimatedGas = await publicClient.estimateGas({
+      to: tx.to as Address,
+      data: txData,
+      value: txValue,
+      account: account.address,
+    });
+  } catch (gasErr) {
+    const gasErrMsg = gasErr instanceof Error ? gasErr.message : String(gasErr);
+    throw new Error(`0x sell gas estimation failed (tx likely to revert): ${gasErrMsg.slice(0, 300)}`);
+  }
+
+  const gasLimit = (estimatedGas * 120n) / 100n;
+  const maxFeePerGas = fees.maxFeePerGas;
+  const maxPriorityFeePerGas =
+    fees.maxPriorityFeePerGas < maxFeePerGas ? fees.maxPriorityFeePerGas : maxFeePerGas;
+
+  // ── Pre-flight balance check ─────────────────────────────────────────────
+  const ethBalanceBefore = await publicClient.getBalance({ address: account.address });
+  if (ethBalanceBefore < gasLimit * maxFeePerGas + txValue) {
+    throw new Error(
+      `0x sell aborted — insufficient ETH for gas: wallet ${formatEther(ethBalanceBefore)} ETH, ` +
+      `estimated cost ${formatEther(gasLimit * maxFeePerGas)} ETH`,
+    );
+  }
+
+  logger.info(
+    { ...logCtx, estimatedGas: estimatedGas.toString(), gasLimit: gasLimit.toString(), maxFeePerGas: maxFeePerGas.toString() },
+    "0x sell: gas estimated",
+  );
+
+  // ── Submit transaction ───────────────────────────────────────────────────
+  const txHash = await walletClient.sendTransaction({
+    to: tx.to as Address,
+    data: txData,
+    value: txValue,
+    gas: gasLimit,
+    maxFeePerGas,
+    maxPriorityFeePerGas,
+    account,
+    chain: base,
+  });
+
+  logger.info({ ...logCtx, txHash }, "0x sell tx submitted");
+
+  let receipt: Awaited<ReturnType<typeof publicClient.waitForTransactionReceipt>>;
+  try {
+    receipt = await publicClient.waitForTransactionReceipt({ hash: txHash, timeout: 120_000 });
+  } catch (receiptErr) {
+    const baseMsg = receiptErr instanceof Error ? receiptErr.message : String(receiptErr);
+    throw new Error(`0x sell receipt timeout for ${txHash}: ${baseMsg.slice(0, 200)}`);
+  }
+
+  if (receipt.status !== "success") {
+    throw new Error(`0x sell tx reverted on-chain: ${txHash}`);
+  }
+
+  // ── Measure ETH received (balance diff + gas repayment) ──────────────────
+  const gasCostActual = receipt.gasUsed * (receipt.effectiveGasPrice ?? maxFeePerGas);
+  const ethBalanceAfter = await publicClient.getBalance({ address: account.address });
+  const ethReceivedWei = ethBalanceAfter > ethBalanceBefore
+    ? ethBalanceAfter - ethBalanceBefore + gasCostActual
+    : (quote.minBuyAmount ? BigInt(quote.minBuyAmount) : 0n);
+  const ethReceived = formatEther(ethReceivedWei);
+
+  const [updated] = await db
+    .update(tradesTable)
+    .set({ status: "sold", sellTxHash: txHash, sellAmountEth: ethReceived, pnlEth: ethReceived })
+    .where(eq(tradesTable.id, tradeId))
+    .returning();
+
+  broadcast("trade", updated);
+  logger.info({ tradeId, ethReceived, reason }, "Sell confirmed via 0x API (token → ETH)");
+}
+
+/**
+ * Sell via Li.Fi (token → ETH) — used as fallback when 0x API fails.
  * Records the result in the trades table and broadcasts the update.
  */
 async function executeLiFiSell(params: {
@@ -792,177 +763,7 @@ async function executeLiFiSell(params: {
   logger.info({ tradeId, ethRecovered, reason }, "Sniper sell confirmed via Li.Fi fallback");
 }
 
-/**
- * Sell tokens via Zora Quote API (token → USDC).
- * USDC routing is more reliable than ETH for Zora content coins whose pools
- * pair against a creator coin rather than WETH directly.
- * Throws on failure so the caller can fall back to Li.Fi.
- */
-async function executeZoraSellViaApi(params: {
-  tradeId: number;
-  tokenAddress: Address;
-  tokenBalance: bigint;
-  slippagePercent: number;
-  maxGasGwei: number;
-  reason: string;
-}): Promise<void> {
-  const { tradeId, tokenAddress, tokenBalance, slippagePercent, maxGasGwei, reason } = params;
-  const slippage = slippagePercent / 100;
-  const account = privateKeyToAccount(getWalletKey());
-  const httpUrl = getHttpRpcUrl();
-  const publicClient = createPublicClient({ chain: base, transport: http(httpUrl) });
-  const walletClient = createWalletClient({ account, chain: base, transport: http(httpUrl) });
-
-  const swapCtx = { tradeId, reason };
-
-  // ── Snapshot USDC balance before sell ────────────────────────────────────
-  const usdcBefore = await publicClient.readContract({
-    address: USDC_BASE,
-    abi: ERC20_ABI,
-    functionName: "balanceOf",
-    args: [account.address],
-  });
-
-  // ── Get sell quote (token → USDC) ─────────────────────────────────────────
-  const { call: rawCall, permits } = await fetchZoraSellQuote({
-    tokenAddress,
-    tokenAmountWei: tokenBalance,
-    slippage,
-    sender: account.address,
-  });
-
-  // ── Handle Permit2 if the API returned permit data ────────────────────────
-  //
-  // New flow (uses the official Zora API `signatures` field):
-  //   1. Sign each permit locally (EIP-712 via Permit2).
-  //   2. Re-call /quote with the signed permits in the `signatures` array.
-  //      The API embeds the signatures directly into the returned calldata —
-  //      no injectPermitSignature() byte manipulation needed.
-  //   3. Use the calldata from the re-quote as the final transaction payload.
-  //
-  // This eliminates the fragile placeholder-injection step and ensures the
-  // calldata the node simulates is identical to what we submit on-chain.
-  let call = rawCall;
-  let tokenInAddress: Address | null = tokenAddress; // null → skip approval inside executeZoraSwapTx
-
-  if (permits.length > 0) {
-    logger.info({ tradeId, permitsCount: permits.length }, "Signing Permit2 for Zora sell");
-
-    // Approve Permit2 contract to spend tokens (if not already sufficient)
-    const permit2Allowance = await publicClient.readContract({
-      address: tokenAddress,
-      abi: ERC20_ABI,
-      functionName: "allowance",
-      args: [account.address, PERMIT2_ADDRESS],
-    });
-    if (permit2Allowance < tokenBalance) {
-      logger.info({ tradeId, spender: PERMIT2_ADDRESS }, "Approving Permit2 contract for sell");
-      const approveTx = await walletClient.writeContract({
-        address: tokenAddress,
-        abi: ERC20_ABI,
-        functionName: "approve",
-        args: [PERMIT2_ADDRESS, maxUint256],
-        chain: base,
-        account,
-      });
-      await publicClient.waitForTransactionReceipt({ hash: approveTx, timeout: 60_000 });
-      logger.info({ tradeId, approveTx }, "Permit2 approval confirmed");
-    }
-
-    // Sign each permit
-    const signedPermits: Array<{ permit: ZoraPermit["permit"]; signature: string }> = [];
-    for (const p of permits) {
-      const sig = await walletClient.signTypedData({
-        account,
-        domain: {
-          name: "Permit2",
-          chainId: base.id,
-          verifyingContract: PERMIT2_ADDRESS,
-        },
-        types: {
-          PermitDetails: [
-            { name: "token", type: "address" },
-            { name: "amount", type: "uint160" },
-            { name: "expiration", type: "uint48" },
-            { name: "nonce", type: "uint48" },
-          ],
-          PermitSingle: [
-            { name: "details", type: "PermitDetails" },
-            { name: "spender", type: "address" },
-            { name: "sigDeadline", type: "uint256" },
-          ],
-        },
-        primaryType: "PermitSingle",
-        message: {
-          details: {
-            token: p.permit.details.token as Address,
-            amount: BigInt(p.permit.details.amount),
-            expiration: p.permit.details.expiration,
-            nonce: p.permit.details.nonce,
-          },
-          spender: p.permit.spender as Address,
-          sigDeadline: BigInt(p.permit.sigDeadline),
-        },
-      });
-      signedPermits.push({ permit: p.permit, signature: sig });
-      logger.info({ tradeId, sigLength: sig.length }, "Permit2 signature ready");
-    }
-
-    // Re-quote with signed permits — API embeds signatures into calldata directly.
-    // This replaces the old injectPermitSignature() byte-manipulation approach.
-    logger.info({ tradeId, permitsCount: signedPermits.length }, "Re-quoting with signed permits");
-    const { call: signedCall } = await fetchZoraQuoteGeneric({
-      tokenIn: { type: "erc20", address: tokenAddress.toLowerCase() },
-      tokenOut: { type: "erc20", address: USDC_BASE.toLowerCase() },
-      amountIn: tokenBalance,
-      slippage,
-      sender: account.address,
-      label: "Zora sell re-quote (with signatures)",
-      permitActiveSeconds: 300,
-      signatures: signedPermits,
-    });
-
-    call = signedCall;
-    // Permit2 handles token authorization — skip direct router approval
-    tokenInAddress = null;
-  }
-
-  const lastTxHash = await executeZoraSwapTx({
-    call,
-    tokenInAddress,
-    tokenInAmount: tokenBalance,
-    maxGasGwei,
-    publicClient,
-    walletClient,
-    account,
-    logCtx: { ...swapCtx, step: "sell-to-usdc" },
-  });
-
-  // ── Calculate USDC received ───────────────────────────────────────────────
-  const usdcAfter = await publicClient.readContract({
-    address: USDC_BASE,
-    abi: ERC20_ABI,
-    functionName: "balanceOf",
-    args: [account.address],
-  });
-  const usdcReceived = usdcAfter > usdcBefore ? usdcAfter - usdcBefore : 0n;
-  // sellAmountEth field stores USDC received (6 decimals); pnlEth stores same
-  const sellAmountUsdc = formatUnits(usdcReceived, USDC_DECIMALS);
-
-  const [updated] = await db
-    .update(tradesTable)
-    .set({ status: "sold", sellTxHash: lastTxHash, sellAmountEth: sellAmountUsdc, pnlEth: sellAmountUsdc })
-    .where(eq(tradesTable.id, tradeId))
-    .returning();
-
-  broadcast("trade", updated);
-  logger.info(
-    { tradeId, sellAmountUsdc, reason },
-    "Sniper sell confirmed via Zora API (token → USDC)",
-  );
-}
-
-// ── executeBuy ──────────────────────────────────────────────────────���─────
+// ── executeBuy ─────────────────────────────────────────────────────────────
 
 export async function executeBuy(params: TradeParams): Promise<void> {
   const {
