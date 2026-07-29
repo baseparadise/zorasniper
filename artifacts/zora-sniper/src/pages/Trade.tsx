@@ -294,8 +294,6 @@ function PositionCard({ position, onRefresh }: { position: any; onRefresh: () =>
         </div>
       </div>
 
-      </div>
-
       {/* Balance + TP/SL badges */}
       <div className="flex items-center justify-between gap-2">
         <div className="text-[11px] text-white/35 font-mono">
