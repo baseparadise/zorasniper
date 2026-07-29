@@ -400,8 +400,10 @@ export const GetTokenInfoResponse = zod.object({
   "symbol": zod.string(),
   "totalSupply": zod.string().describe('Human-readable total supply (18 decimals divided)'),
   "walletBalance": zod.string().describe('Current wallet balance in tokens'),
-  "priceEth": zod.string().describe('Estimated ETH price per token (from small-buy simulation)'),
-  "mcEth": zod.string().describe('Estimated market cap in ETH')
+  "priceEth": zod.string().describe('Price per token in ETH (from priceInPoolToken)'),
+  "mcEth": zod.string().describe('Market cap in ETH'),
+  "priceUsd": zod.string().describe('Price per token in USD (from priceInUsdc)'),
+  "mcUsd": zod.string().describe('Market cap in USD')
 })
 
 

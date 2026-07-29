@@ -1573,17 +1573,25 @@ router.get("/token/:address", async (req, res): Promise<void> => {
     const pricePoolFloat = priceInPoolToken ? parseFloat(priceInPoolToken) : 0;
     const priceUsdcFloat = priceInUsdc ? parseFloat(priceInUsdc) : 0;
 
+    let priceUsd = "0";
+    let mcUsd = "0";
+
     if (pricePoolFloat > 0) {
       priceEth = pricePoolFloat.toFixed(18);
     }
 
-    if (pricePoolFloat > 0 && priceUsdcFloat > 0 && marketCapRaw) {
+    if (priceUsdcFloat > 0) {
+      priceUsd = priceUsdcFloat.toFixed(8);
+    }
+
+    if (marketCapRaw) {
       const marketCapUsd = parseFloat(marketCapRaw);
       if (marketCapUsd > 0) {
-        // ETH per dollar = priceInPoolToken / priceInUsdc
-        const ethPerDollar = pricePoolFloat / priceUsdcFloat;
-        const mcNum = marketCapUsd * ethPerDollar;
-        mcEth = mcNum.toFixed(6);
+        mcUsd = marketCapUsd.toFixed(2);
+        if (pricePoolFloat > 0 && priceUsdcFloat > 0) {
+          const ethPerDollar = pricePoolFloat / priceUsdcFloat;
+          mcEth = (marketCapUsd * ethPerDollar).toFixed(6);
+        }
       }
     }
 
@@ -1603,7 +1611,7 @@ router.get("/token/:address", async (req, res): Promise<void> => {
       /* no wallet configured or RPC unavailable */
     }
 
-    res.json({ address: addr, name, symbol, totalSupply, walletBalance, priceEth, mcEth });
+    res.json({ address: addr, name, symbol, totalSupply, walletBalance, priceEth, mcEth, priceUsd, mcUsd });
   } catch (err) {
     req.log.error({ err, address }, "Token info fetch failed");
     res.status(500).json({ error: "Failed to fetch token info" });

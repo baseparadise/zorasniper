@@ -14,8 +14,12 @@ export interface TokenInfo {
   totalSupply: string;
   /** Current wallet balance in tokens */
   walletBalance: string;
-  /** Estimated ETH price per token (from small-buy simulation) */
+  /** Price per token in ETH (from priceInPoolToken) */
   priceEth: string;
-  /** Estimated market cap in ETH */
+  /** Market cap in ETH */
   mcEth: string;
+  /** Price per token in USD (from priceInUsdc) */
+  priceUsd: string;
+  /** Market cap in USD */
+  mcUsd: string;
 }

@@ -639,6 +639,8 @@ components:
         - walletBalance
         - priceEth
         - mcEth
+        - priceUsd
+        - mcUsd
       properties:
         address:
           type: string
@@ -654,10 +656,16 @@ components:
           description: Current wallet balance in tokens
         priceEth:
           type: string
-          description: Estimated ETH price per token (from small-buy simulation)
+          description: Price per token in ETH (from priceInPoolToken)
         mcEth:
           type: string
-          description: Estimated market cap in ETH
+          description: Market cap in ETH
+        priceUsd:
+          type: string
+          description: Price per token in USD (from priceInUsdc)
+        mcUsd:
+          type: string
+          description: Market cap in USD
 
     TradeStats:
       type: object

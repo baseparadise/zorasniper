@@ -45,9 +45,19 @@ function TokenPreview({ address }: { address: string }) {
     );
   }
 
-  const priceNum = parseFloat(data.priceEth);
-  const mcNum = parseFloat(data.mcEth);
+  const priceUsdNum = parseFloat(data.priceUsd ?? "0");
+  const mcUsdNum = parseFloat(data.mcUsd ?? "0");
   const walletNum = parseFloat(data.walletBalance);
+
+  function formatUsd(val: number): string {
+    if (val === 0) return "—";
+    if (val < 0.000001) return `$${val.toExponential(3)}`;
+    if (val < 0.01) return `$${val.toFixed(6)}`;
+    if (val < 1) return `$${val.toFixed(4)}`;
+    if (val >= 1_000_000) return `$${(val / 1_000_000).toFixed(2)}M`;
+    if (val >= 1_000) return `$${(val / 1_000).toFixed(2)}K`;
+    return `$${val.toFixed(2)}`;
+  }
 
   return (
     <div className="rounded-2xl border border-violet-500/20 bg-violet-500/5 p-4 space-y-3">
@@ -74,13 +84,13 @@ function TokenPreview({ address }: { address: string }) {
         <div className="rounded-xl bg-white/5 p-2.5 text-center">
           <p className="text-white/30 text-[10px] uppercase tracking-wider mb-1">Price</p>
           <p className="text-white font-mono text-xs font-semibold">
-            {priceNum > 0 ? `${priceNum.toExponential(3)} ETH` : "—"}
+            {formatUsd(priceUsdNum)}
           </p>
         </div>
         <div className="rounded-xl bg-white/5 p-2.5 text-center">
           <p className="text-white/30 text-[10px] uppercase tracking-wider mb-1">MC</p>
           <p className="text-white font-mono text-xs font-semibold">
-            {mcNum > 0 ? `${mcNum.toFixed(2)} ETH` : "—"}
+            {formatUsd(mcUsdNum)}
           </p>
         </div>
         <div className="rounded-xl bg-white/5 p-2.5 text-center">
