@@ -107,20 +107,23 @@ function TokenPreview({ address }: { address: string }) {
 // ── Position card ──────────────────────────────────────────────────────────
 
 function PositionCard({ position, onRefresh }: { position: any; onRefresh: () => void }) {
-  const { trade, currentBalanceTokens, currentValueEth, pnlPercent, entryPriceEth } = position;
+  const { trade, currentBalanceTokens, currentValueUsdc, pnlPercent, entryPriceEth } = position;
 
   // Live token price/MC — refreshed every 30 s (same Zora API as TokenPreview above)
   const { data: tokenInfo } = useGetTokenInfo(trade.tokenAddress as string, {
     query: { refetchInterval: 30_000 },
   });
 
-  // Real-time USD value: balance × current market price
+  // Real-time USD value: balance × current market price (live from Zora /coin API)
+  // Falls back to backend-computed currentValueUsdc (same formula) on initial load
   const liveValueUsd = (() => {
-    if (!tokenInfo) return null;
-    const bal = parseFloat(tokenInfo.walletBalance ?? "0");
-    const price = parseFloat(tokenInfo.priceUsd ?? "0");
-    if (bal <= 0 || price <= 0) return null;
-    return bal * price;
+    if (tokenInfo) {
+      const bal = parseFloat(tokenInfo.walletBalance ?? "0");
+      const price = parseFloat(tokenInfo.priceUsd ?? "0");
+      if (bal > 0 && price > 0) return bal * price;
+    }
+    const usdc = parseFloat((currentValueUsdc as string) ?? "0");
+    return usdc > 0 ? usdc : null;
   })();
 
   // PnL% vs USD cost basis (entryValueUsdc); fallback to ETH-based pnlPercent from backend
