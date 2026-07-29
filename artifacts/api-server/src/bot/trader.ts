@@ -608,55 +608,67 @@ async function executeZoraSwapTx(params: {
 }
 
 /**
- * Fetch the current USDC value of a given token amount via a sell-direction quote.
+ * Fetch the current market price of a token in USDC via the Zora /coin endpoint.
  *
- * This replaces the old buy-probe approach (PROBE_ETH_WEI → token). The key insight:
- * - Old: simulate buying 0.001 ETH worth of tokens → derive price per token
- *   Problem: tiny probe amount causes huge price impact → price 31x off from reality.
- * - New: simulate selling the ACTUAL token balance → get USDC out directly.
- *   Result: answers the real question ("what is my position worth right now?")
- *   with no assumptions, no price-impact error, no ETH/USDC conversion needed.
+ * Uses zora20Token.tokenPrice.priceInUsdc — the market price per token based on
+ * the bonding curve / pool state. This is NOT a sell simulation, so it is not
+ * affected by sell-side price impact.
  *
- * Returns null if the pool has no liquidity or the API cannot find a route.
+ * Returns null if the token is not yet indexed or the API cannot return a price.
  * Expected for very new tokens (< few blocks old); caller should skip and retry.
  */
-async function fetchCurrentValueUsdc(
-  tokenAddress: string,
-  tokenAmountWei: bigint,
-  sender: string,
-): Promise<number | null> {
-  if (tokenAmountWei === 0n) return 0;
-
-  const headers: Record<string, string> = { "Content-Type": "application/json" };
-  const _apiKey = nextZoraKey();
-  if (_apiKey) headers["x-api-key"] = _apiKey;
-
+async function fetchTokenPriceUsdc(tokenAddress: string): Promise<number | null> {
   try {
-    const body = JSON.stringify({
-      chainId: base.id,
-      tokenIn: { type: "erc20", address: tokenAddress.toLowerCase() },
-      tokenOut: { type: "erc20", address: USDC_BASE.toLowerCase() },
-      amountIn: tokenAmountWei.toString(),
-      slippage: 0.5,
-      sender: sender.toLowerCase(),
-      recipient: sender.toLowerCase(),
-    });
+    const headers: Record<string, string> = {};
+    const _apiKey = nextZoraKey();
+    if (_apiKey) headers["x-api-key"] = _apiKey;
 
-    const res = await fetch(`${ZORA_QUOTE_API}/quote`, { method: "POST", headers, body });
+    const res = await fetch(
+      `${ZORA_QUOTE_API}/coin?chainId=${base.id}&address=${tokenAddress.toLowerCase()}`,
+      { headers, signal: AbortSignal.timeout(10_000) },
+    );
 
     if (res.ok) {
       const data = await res.json();
-      const amountOutStr: string | undefined = data.quote?.amountOut;
-      if (amountOutStr && amountOutStr !== "0") {
-        const usdcValue = parseFloat(formatUnits(BigInt(amountOutStr), USDC_DECIMALS));
-        if (usdcValue > 0) return usdcValue;
+      const priceInUsdc: string | undefined = data?.zora20Token?.tokenPrice?.priceInUsdc;
+      if (priceInUsdc) {
+        const price = parseFloat(priceInUsdc);
+        if (price > 0) return price;
       }
     }
   } catch (err) {
-    logger.warn({ err, tokenAddress }, "fetchCurrentValueUsdc: sell quote failed");
+    logger.warn({ err, tokenAddress }, "fetchTokenPriceUsdc: /coin endpoint failed");
   }
 
   return null;
+}
+
+/**
+ * Compute the current USDC value of a token position via price × balance.
+ *
+ * Formula: (tokenBalanceWei / 1e18) × pricePerTokenUsdc
+ *
+ * Why price × balance instead of a sell quote:
+ * - Sell quote for the FULL balance simulates selling all tokens at once, which
+ *   crashes the price in thin Zora pools → reported value is far below the real
+ *   market value of the position.
+ * - price × balance uses the market price per token (from the Zora /coin API),
+ *   which is what the position is actually worth at current market conditions,
+ *   consistent with how the price is displayed in the UI.
+ *
+ * Returns null if the price cannot be determined; caller should skip and retry.
+ */
+async function fetchPositionValueUsdc(
+  tokenAddress: string,
+  tokenBalanceWei: bigint,
+): Promise<number | null> {
+  if (tokenBalanceWei === 0n) return 0;
+
+  const priceUsdc = await fetchTokenPriceUsdc(tokenAddress);
+  if (priceUsdc === null) return null;
+
+  const tokenAmount = parseFloat(formatUnits(tokenBalanceWei, 18));
+  return tokenAmount * priceUsdc;
 }
 
 /**
@@ -1105,11 +1117,12 @@ export async function executeBuy(params: TradeParams): Promise<void> {
       logger.warn({ tokenAddress, err: err instanceof Error ? err.message : String(err) }, "balanceOf diff failed — token amount left blank");
     }
 
-    // ── Step 7: Fetch entry USDC value via sell quote ────────────────────────
-    // Ask "if I sold all tokens right now, how much USDC would I get?"
-    // This is the true cost basis: accounts for price impact and fees already
-    // paid during the buy. entryPriceEth (ETH_spent / tokens) over-estimates
-    // entry because it includes slippage you already lost.
+    // ── Step 7: Fetch entry USDC value via price × balance ───────────────────
+    // Fetch market price per token from Zora /coin API and multiply by the
+    // actual token balance received. This avoids sell-quote price impact:
+    // selling the full balance in a thin Zora pool crashes the simulated price,
+    // making the entry value appear far lower than the real market value and
+    // causing TP/SL thresholds to be miscalibrated.
     let entryValueUsdc: string | null = null;
     let receivedWei = 0n;
     try {
@@ -1124,10 +1137,10 @@ export async function executeBuy(params: TradeParams): Promise<void> {
 
     if (receivedWei > 0n) {
       try {
-        const usdcVal = await fetchCurrentValueUsdc(tokenAddress, receivedWei, account.address);
+        const usdcVal = await fetchPositionValueUsdc(tokenAddress, receivedWei);
         if (usdcVal !== null) {
           entryValueUsdc = usdcVal.toFixed(6);
-          logger.info({ entryValueUsdc, tokenAddress }, "Entry USDC value measured via sell quote");
+          logger.info({ entryValueUsdc, tokenAddress }, "Entry USDC value measured via price × balance");
         }
       } catch (err) {
         logger.warn({ err }, "Failed to fetch entry USDC value — TP/SL will be skipped");
@@ -1278,9 +1291,10 @@ export async function monitorTpSlSniper(
         return;
       }
 
-      // ── Read current token balance then get sell quote → USDC value ──────
-      // Selling the actual token balance gives the real position value with
-      // correct price impact — no ETH/USDC rate conversion needed.
+      // ── Read current token balance then compute value via price × balance ──
+      // Uses market price from Zora /coin API multiplied by current balance.
+      // Consistent with entry value measurement — both use price × balance so
+      // PnL% reflects actual price movement, not sell-side price impact.
       const tokenBalance = await publicClient.readContract({
         address: tokenAddress,
         abi: ERC20_ABI,
@@ -1297,12 +1311,12 @@ export async function monitorTpSlSniper(
         return;
       }
 
-      const currentValueUsdc = await fetchCurrentValueUsdc(tokenAddress, tokenBalance, account.address);
+      const currentValueUsdc = await fetchPositionValueUsdc(tokenAddress, tokenBalance);
 
       if (currentValueUsdc === null) {
         logger.debug(
           { tradeId, tokenAddress },
-          "Sniper TP/SL: USDC value probe null — pool may still be initialising, retrying",
+          "Sniper TP/SL: price not yet available — token may still be indexing, retrying",
         );
         continue;
       }
