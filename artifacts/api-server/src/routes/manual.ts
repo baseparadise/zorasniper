@@ -1516,20 +1516,101 @@ router.get("/token/:address", async (req, res): Promise<void> => {
   }
 
   const addr = address as Address;
-  const publicClient = makePublicClient();
 
   try {
-    const [name, symbol, totalSupply] = await Promise.all([
-      publicClient.readContract({ address: addr, abi: ERC20_ABI, functionName: "name" }),
-      publicClient.readContract({ address: addr, abi: ERC20_ABI, functionName: "symbol" }),
-      publicClient.readContract({ address: addr, abi: ERC20_ABI, functionName: "totalSupply" }),
-    ]);
+    // ── Fetch coin details from Zora SDK API (GET /coin) ─────────────────
+    // Primary source for name, symbol, totalSupply, and price.
+    // Much more reliable than viem RPC calls + sell-direction price probes.
+    const coinHeaders: Record<string, string> = { "Content-Type": "application/json" };
+    const _apiKey = nextZoraKey();
+    if (_apiKey) coinHeaders["x-api-key"] = _apiKey;
 
-    let walletBalance = "0";
-    let rawBal = 0n;
+    const coinRes = await fetch(
+      `${ZORA_QUOTE_API}/coin?address=${addr.toLowerCase()}&chain=${BASE_CHAIN_ID}`,
+      { headers: coinHeaders },
+    );
+
+    if (!coinRes.ok) {
+      const text = await coinRes.text().catch(() => "");
+      req.log.warn({ address, status: coinRes.status, body: text.slice(0, 100) }, "Zora /coin fetch failed");
+      res.status(404).json({ error: "Token not found or not a Zora coin" });
+      return;
+    }
+
+    const coinData = await coinRes.json();
+    // Zora SDK API returns data under `coin` or `zora20Token` depending on version
+    const token = coinData?.coin ?? coinData?.zora20Token;
+
+    if (!token) {
+      req.log.warn({ address, coinData: JSON.stringify(coinData).slice(0, 200) }, "Zora /coin: unexpected response shape");
+      res.status(404).json({ error: "Token data not found in Zora API response" });
+      return;
+    }
+
+    const name: string = token.name ?? "Unknown";
+    const symbol: string = token.symbol ?? "?";
+    // totalSupply may be a raw integer string (18 decimals) or already formatted
+    const totalSupplyRaw: string = String(token.totalSupply ?? "0");
+    let totalSupply = "0";
     try {
+      totalSupply = /\./.test(totalSupplyRaw)
+        ? totalSupplyRaw
+        : formatUnits(BigInt(totalSupplyRaw), 18);
+    } catch {
+      totalSupply = totalSupplyRaw;
+    }
+
+    // ── Price: priceInUsdc → ETH ──────────────────────────────────────────
+    // Zora API returns price in USDC; convert to ETH via a quick 1-ETH probe.
+    let priceEth = "0";
+    let mcEth = "0";
+    const priceInUsdc: string | undefined =
+      token?.tokenPrice?.priceInUsdc ??
+      token?.price?.usdc ??
+      token?.marketPrice;
+
+    if (priceInUsdc) {
+      const tokenPriceUsdc = parseFloat(priceInUsdc);
+      if (tokenPriceUsdc > 0) {
+        try {
+          const ethUsdcRes = await fetch(`${ZORA_QUOTE_API}/quote`, {
+            method: "POST",
+            headers: coinHeaders,
+            body: JSON.stringify({
+              chainId: BASE_CHAIN_ID,
+              tokenIn: { type: "eth" },
+              tokenOut: { type: "erc20", address: USDC_BASE.toLowerCase() },
+              amountIn: parseEther("1").toString(),
+              slippage: 0.5,
+              sender: ZERO_ADDRESS,
+              recipient: ZERO_ADDRESS,
+            }),
+          });
+          if (ethUsdcRes.ok) {
+            const ethUsdcData = await ethUsdcRes.json();
+            const usdcPerEthStr: string | undefined = ethUsdcData.quote?.amountOut;
+            if (usdcPerEthStr) {
+              const usdcPerEth = parseFloat(formatUnits(BigInt(usdcPerEthStr), USDC_DECIMALS));
+              if (usdcPerEth > 0) {
+                const ethPrice = tokenPriceUsdc / usdcPerEth;
+                priceEth = ethPrice.toFixed(18);
+                const mcNum = parseFloat(totalSupply) * ethPrice;
+                mcEth = mcNum.toFixed(6);
+              }
+            }
+          }
+        } catch {
+          /* ETH/USDC probe failed — leave priceEth as 0 */
+        }
+      }
+    }
+
+    // ── Wallet balance (on-chain, optional) ──────────────────────────────
+    let walletBalance = "0";
+    try {
+      const publicClient = makePublicClient();
       const account = privateKeyToAccount(getWalletKey());
-      rawBal = await publicClient.readContract({
+      const rawBal = await publicClient.readContract({
         address: addr,
         abi: ERC20_ABI,
         functionName: "balanceOf",
@@ -1537,33 +1618,13 @@ router.get("/token/:address", async (req, res): Promise<void> => {
       });
       walletBalance = formatUnits(rawBal, 18);
     } catch {
-      /* no wallet configured */
+      /* no wallet configured or RPC unavailable */
     }
 
-    // ── Price estimation: sell-direction Zora probe (same as TP/SL monitor) ──
-    // Use actual wallet balance if held; otherwise probe with 1 token.
-    // This ensures token info fetch is a live canary for monitor health.
-    let priceEth = "0";
-    let mcEth = "0";
-    try {
-      let probeAccount: Address;
-      try { probeAccount = privateKeyToAccount(getWalletKey()).address; } catch { probeAccount = ZERO_ADDRESS; }
-
-      const probeAmountWei = rawBal > 0n ? rawBal : parseUnits("1", 18);
-      const zoraPrice = await fetchZoraPriceProbe(addr, probeAccount, probeAmountWei);
-      if (zoraPrice !== null) {
-        priceEth = zoraPrice.toFixed(18);
-        const mcNum = parseFloat(formatUnits(totalSupply as bigint, 18)) * zoraPrice;
-        mcEth = mcNum.toFixed(6);
-      }
-    } catch {
-      /* pool not yet active or no route available */
-    }
-
-    res.json({ address: addr, name, symbol, totalSupply: formatUnits(totalSupply as bigint, 18), walletBalance, priceEth, mcEth });
+    res.json({ address: addr, name, symbol, totalSupply, walletBalance, priceEth, mcEth });
   } catch (err) {
     req.log.error({ err, address }, "Token info fetch failed");
-    res.status(500).json({ error: "Failed to fetch token info from chain" });
+    res.status(500).json({ error: "Failed to fetch token info" });
   }
 });
 
