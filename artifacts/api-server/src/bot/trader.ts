@@ -485,8 +485,18 @@ async function executeZoraSwapTx(params: {
     logger.info(logCtx, "Swap simulation passed");
   } catch (simErr) {
     simFailed = true;
-    const msg = simErr instanceof Error ? simErr.message.slice(0, 200) : String(simErr);
-    logger.warn({ ...logCtx, msg }, "Swap simulation warning — proceeding");
+    // Extract as much detail as possible from viem simulation errors.
+    // viem stores the real revert reason in .cause.reason (ABI-decoded) or
+    // .cause.data (raw bytes) — .message alone is often just the formatted wrapper.
+    const simMsg = simErr instanceof Error ? simErr.message.slice(0, 300) : String(simErr);
+    const simShort = String((simErr as any)?.shortMessage ?? "");
+    const simDetails = String((simErr as any)?.details ?? "");
+    const causeReason = String((simErr as any)?.cause?.reason ?? "");
+    const causeData = String((simErr as any)?.cause?.data ?? "");
+    logger.warn(
+      { ...logCtx, simMsg, simShort, simDetails, causeReason, causeData },
+      "Swap simulation warning — tx will likely revert on-chain (proceeding to gas check)",
+    );
   }
 
   // Gas estimation with fallback
