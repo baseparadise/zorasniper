@@ -571,6 +571,17 @@ async function executeViaZora(
   const success = receipt.status === "success";
 
   if (success) {
+    // Fetch USDC price to store entryValueUsdc — used by the unified TP/SL monitor
+    let entryValueUsdcStr: string | null = null;
+    if (tokensNum > 0) {
+      try {
+        const priceUsdc = await fetchTokenPriceUsdc(tokenAddress);
+        if (priceUsdc !== null) {
+          entryValueUsdcStr = (tokensNum * priceUsdc).toFixed(6);
+        }
+      } catch { /* price unavailable — leave null */ }
+    }
+
     await db
       .update(tradesTable)
       .set({
@@ -579,11 +590,12 @@ async function executeViaZora(
         gasUsedEth,
         tokenAmount: tokenAmount || null,
         entryPriceEth: entryPriceStr,
+        entryValueUsdc: entryValueUsdcStr,
         blockNumber: Number(receipt.blockNumber),
       })
       .where(eq(tradesTable.id, tradeId));
 
-    logger.info({ tradeId, txHash, gasUsedEth, tokenAmount, entryPriceNum }, "Manual buy confirmed via Zora API");
+    logger.info({ tradeId, txHash, gasUsedEth, tokenAmount, entryPriceNum, entryValueUsdcStr }, "Manual buy confirmed via Zora API");
     return entryPriceNum;
   } else {
     await db
@@ -687,6 +699,17 @@ async function executeViaLiFi(
     const entryPriceNum = tokensNum > 0 ? ethNum / tokensNum : 0;
     const entryPriceStr = entryPriceNum > 0 ? entryPriceNum.toFixed(18) : null;
 
+    // Fetch USDC price to store entryValueUsdc — used by the unified TP/SL monitor
+    let entryValueUsdcStr: string | null = null;
+    if (tokensNum > 0) {
+      try {
+        const priceUsdc = await fetchTokenPriceUsdc(tokenAddress);
+        if (priceUsdc !== null) {
+          entryValueUsdcStr = (tokensNum * priceUsdc).toFixed(6);
+        }
+      } catch { /* price unavailable — leave null */ }
+    }
+
     await db
       .update(tradesTable)
       .set({
@@ -695,11 +718,12 @@ async function executeViaLiFi(
         gasUsedEth,
         tokenAmount,
         entryPriceEth: entryPriceStr,
+        entryValueUsdc: entryValueUsdcStr,
         blockNumber: Number(receipt.blockNumber),
       })
       .where(eq(tradesTable.id, tradeId));
 
-    logger.info({ tradeId, hash, gasUsedEth, tokenAmount, entryPriceNum }, "Manual buy confirmed via Li.Fi");
+    logger.info({ tradeId, hash, gasUsedEth, tokenAmount, entryPriceNum, entryValueUsdcStr }, "Manual buy confirmed via Li.Fi");
     return entryPriceNum;
   } else {
     await db
@@ -770,156 +794,6 @@ async function runBuy(
       .where(eq(tradesTable.id, tradeId));
     logger.error({ err, tradeId }, "Manual buy execution failed");
     return 0;
-  }
-}
-
-// ── TP/SL background monitor ───────────────────────────────────────────────
-
-/**
- * Polls price every 15 s and triggers a sell when TP or SL is hit.
- *
- * Price probe strategy (mirrors the dual-path buy routing):
- *   1. Zora Quote API probe (same as sniper) — works for Zora Coins.
- *   2. Li.Fi quote probe — fallback for non-Zora tokens that used Li.Fi to buy.
- * If both probes return null in a cycle the cycle is skipped and retried.
- */
-async function monitorTpSl(
-  tradeId: number,
-  tokenAddress: Address,
-  entryPriceEth: number,
-  takeProfitPercent: number | null,
-  stopLossPercent: number | null,
-  buyAmountEth: string,
-): Promise<void> {
-  if (!takeProfitPercent && !stopLossPercent) return;
-
-  // Throws if wallet key is not configured — caller's .catch() will log the error.
-  // Do NOT fall back to ZERO_ADDRESS: its balance is always 0n and would cause
-  // the monitor to incorrectly mark the position as "sold" on the first TP/SL trigger.
-  const probeAccount: Address = privateKeyToAccount(getWalletKey()).address;
-  const publicClient = makePublicClient();
-
-  const tpPrice = takeProfitPercent ? entryPriceEth * (1 + takeProfitPercent / 100) : null;
-  const slPrice = stopLossPercent ? entryPriceEth * (1 - stopLossPercent / 100) : null;
-
-  logger.info({ tradeId, entryPriceEth, tpPrice, slPrice }, "Starting TP/SL monitor (Zora → Li.Fi)");
-
-  const POLL_INTERVAL_MS = 15_000;
-  const MAX_SELL_ATTEMPTS = 3;
-  let sellAttempts = 0;
-  let active = true;
-
-  while (active) {
-    await new Promise(r => setTimeout(r, POLL_INTERVAL_MS));
-
-    try {
-      // Bail if trade was already closed externally (manual sell, etc.)
-      const [trade] = await db
-        .select({ status: tradesTable.status })
-        .from(tradesTable)
-        .where(eq(tradesTable.id, tradeId));
-
-      if (!trade || trade.status !== "confirmed") {
-        logger.info({ tradeId, status: trade?.status }, "TP/SL monitor: trade no longer active — exiting");
-        return;
-      }
-
-      // ── Price probe: sell-direction Zora (same as TP/SL monitor in trader.ts) ──
-      // Using 1-token probe so this is consistent with how the sniper monitor works.
-      let currentPrice: number | null = null;
-
-      const zoraPrice = await fetchZoraPriceProbe(tokenAddress, probeAccount, parseUnits("1", 18));
-      if (zoraPrice !== null) {
-        currentPrice = zoraPrice;
-      }
-
-      if (currentPrice === null) continue;
-
-      logger.debug({ tradeId, currentPrice, tpPrice, slPrice }, "TP/SL price check");
-
-      const shouldTp = tpPrice !== null && currentPrice >= tpPrice;
-      const shouldSl = slPrice !== null && currentPrice <= slPrice;
-
-      if (!shouldTp && !shouldSl) continue;
-
-      const reason = shouldTp ? "take_profit" : "stop_loss";
-
-      // ── Atomic sell claim — prevents double-sell race condition ───────────
-      // Between the status check above and this point, a manual sell or another
-      // recovery monitor could also read "confirmed" and start selling.
-      // We atomically flip status confirmed → selling here; if 0 rows are
-      // affected another process already claimed the sell and we bail.
-      const [claimed] = await db
-        .update(tradesTable)
-        .set({ status: "selling" })
-        .where(and(eq(tradesTable.id, tradeId), eq(tradesTable.status, "confirmed")))
-        .returning({ id: tradesTable.id });
-
-      if (!claimed) {
-        logger.warn(
-          { tradeId },
-          "TP/SL: sell already claimed by another process — bailing",
-        );
-        active = false;
-        return;
-      }
-
-      logger.info({ tradeId, reason, currentPrice, tpPrice, slPrice }, "TP/SL triggered, executing sell");
-
-      // Stop the loop unless the sell fails and we need to retry
-      active = false;
-
-      const rawBal = await publicClient.readContract({
-        address: tokenAddress,
-        abi: ERC20_ABI,
-        functionName: "balanceOf",
-        args: [probeAccount],
-      });
-
-      if (rawBal === 0n) {
-        logger.warn({ tradeId }, "No token balance to sell — position already closed externally");
-        await db
-          .update(tradesTable)
-          .set({ status: "sold", failReason: "Balance zero at TP/SL trigger" })
-          .where(eq(tradesTable.id, tradeId));
-        return;
-      }
-
-      // ── Try Zora first, fallback to Li.Fi ──────────────────────────────
-      try {
-        await runZoraSell(tradeId, tokenAddress, rawBal, buyAmountEth);
-        logger.info({ tradeId, reason }, "TP/SL sell confirmed via Zora");
-      } catch (zoraErr) {
-        const zoraMsg = (zoraErr instanceof Error ? zoraErr.message : String(zoraErr)).slice(0, 200);
-        logger.warn({ tradeId, zoraMsg }, "TP/SL: Zora sell failed — falling back to Li.Fi");
-        await runLiFiSell(tradeId, tokenAddress, rawBal, buyAmountEth, 10);
-        logger.info({ tradeId, reason }, "TP/SL sell confirmed via Li.Fi");
-      }
-    } catch (err) {
-      // If this was a sell attempt that failed, count it and maybe retry
-      if (!active) {
-        sellAttempts++;
-        logger.error({ err, tradeId, sellAttempts, maxAttempts: MAX_SELL_ATTEMPTS }, "TP/SL sell failed");
-        if (sellAttempts >= MAX_SELL_ATTEMPTS) {
-          logger.error({ tradeId }, "Max sell attempts reached — monitor exiting");
-          await db
-            .update(tradesTable)
-            .set({ status: "failed", failReason: "Max TP/SL sell attempts reached" })
-            .where(eq(tradesTable.id, tradeId));
-          return;
-        }
-        // Reset to confirmed so the next retry can reclaim the sell
-        await db
-          .update(tradesTable)
-          .set({ status: "confirmed" })
-          .where(eq(tradesTable.id, tradeId));
-        // Re-activate to retry sell on next poll cycle
-        active = true;
-      } else {
-        // Error in price probe or DB query — log and continue polling
-        logger.error({ err, tradeId }, "TP/SL monitor cycle error");
-      }
-    }
   }
 }
 
@@ -1393,17 +1267,35 @@ router.post("/trades/manual-buy", async (req, res): Promise<void> => {
     })
     .returning();
 
-  runBuy(tradeRow.id, addr, buyAmountEth, slippagePercent).then((actualEntryPrice) => {
-    const monitorEntryPrice = actualEntryPrice > 0 ? actualEntryPrice : entryPriceEth;
-    if ((takeProfitPercent || stopLossPercent) && monitorEntryPrice > 0) {
-      monitorTpSl(
-        tradeRow.id,
-        addr,
-        monitorEntryPrice,
-        takeProfitPercent ?? null,
-        stopLossPercent ?? null,
-        buyAmountEth,
-      ).catch(err => logger.error({ err, tradeId: tradeRow.id }, "TP/SL monitor error"));
+  runBuy(tradeRow.id, addr, buyAmountEth, slippagePercent).then(async () => {
+    if (takeProfitPercent || stopLossPercent) {
+      // Read entryValueUsdc saved by executeViaZora/executeViaLiFi after buy confirmation.
+      // Use the unified USD-based monitor (same as sniper) for consistent TP/SL behaviour.
+      try {
+        const [updatedTrade] = await db
+          .select({ entryValueUsdc: tradesTable.entryValueUsdc })
+          .from(tradesTable)
+          .where(eq(tradesTable.id, tradeRow.id));
+        const entryValueUsdc = updatedTrade?.entryValueUsdc
+          ? parseFloat(updatedTrade.entryValueUsdc)
+          : 0;
+        if (entryValueUsdc > 0) {
+          const config = await loadConfig();
+          monitorTpSlSniper(
+            tradeRow.id,
+            addr,
+            entryValueUsdc,
+            takeProfitPercent ?? null,
+            stopLossPercent ?? null,
+            config.slippagePercent,
+            config.maxGasGwei,
+          ).catch(err => logger.error({ err, tradeId: tradeRow.id }, "TP/SL monitor error"));
+        } else {
+          logger.warn({ tradeId: tradeRow.id }, "TP/SL monitor skipped — entryValueUsdc not available after buy");
+        }
+      } catch (err) {
+        logger.error({ err, tradeId: tradeRow.id }, "TP/SL monitor setup failed");
+      }
     }
   });
 
@@ -1834,31 +1726,22 @@ router.put("/positions/:id/tpsl", async (req, res): Promise<void> => {
 
   res.json(updated);
 
-  // Start/restart TP/SL monitor — sniper uses Zora API monitor, manual uses dual-path monitor
-  const entryPrice = updated.entryPriceEth ? parseFloat(updated.entryPriceEth) : 0;
-  if ((takeProfitPercent || stopLossPercent) && entryPrice > 0) {
-    if (updated.source === "sniper") {
-      loadConfig().then((config) =>
-        monitorTpSlSniper(
-          updated.id,
-          updated.tokenAddress as Address,
-          entryPrice,
-          takeProfitPercent ?? null,
-          stopLossPercent ?? null,
-          config.slippagePercent,
-          config.maxGasGwei,
-        )
-      ).catch((err) => logger.error({ err, tradeId: updated.id }, "Sniper TP/SL monitor restart error"));
-    } else {
-      monitorTpSl(
+  // Start/restart unified USD-based TP/SL monitor for all trades (sniper and manual)
+  const entryValueUsdc = updated.entryValueUsdc ? parseFloat(updated.entryValueUsdc) : 0;
+  if ((takeProfitPercent || stopLossPercent) && entryValueUsdc > 0) {
+    loadConfig().then((config) =>
+      monitorTpSlSniper(
         updated.id,
         updated.tokenAddress as Address,
-        entryPrice,
+        entryValueUsdc,
         takeProfitPercent ?? null,
         stopLossPercent ?? null,
-        updated.buyAmountEth ?? "0",
-      ).catch((err) => logger.error({ err, tradeId: updated.id }, "TP/SL monitor restart error"));
-    }
+        config.slippagePercent,
+        config.maxGasGwei,
+      )
+    ).catch((err) => logger.error({ err, tradeId: updated.id }, "TP/SL monitor restart error"));
+  } else if (takeProfitPercent || stopLossPercent) {
+    logger.warn({ tradeId: updated.id }, "TP/SL monitor skipped on update — entryValueUsdc not available");
   }
 });
 
@@ -1932,8 +1815,11 @@ export async function recoverTpSlMonitors(): Promise<void> {
         ),
       );
 
+    // Use the unified USD-based monitor (same as sniper). Requires entryValueUsdc.
+    // Trades bought before this unification (entryValueUsdc = null) cannot be recovered
+    // automatically — user can re-set TP/SL via the Edit button to restart the monitor.
     const recoverable = openTrades.filter(
-      (t) => (t.takeProfitPercent || t.stopLossPercent) && t.entryPriceEth,
+      (t) => (t.takeProfitPercent || t.stopLossPercent) && t.entryValueUsdc,
     );
 
     if (recoverable.length === 0) {
@@ -1943,23 +1829,26 @@ export async function recoverTpSlMonitors(): Promise<void> {
 
     logger.info({ count: recoverable.length }, 'TP/SL recovery: restarting monitors');
 
+    const config = await loadConfig();
+
     for (const trade of recoverable) {
-      const entryPrice = parseFloat(trade.entryPriceEth!);
+      const entryValueUsdc = parseFloat(trade.entryValueUsdc!);
       const tp = trade.takeProfitPercent ? parseFloat(trade.takeProfitPercent) : null;
       const sl = trade.stopLossPercent ? parseFloat(trade.stopLossPercent) : null;
 
-      monitorTpSl(
+      monitorTpSlSniper(
         trade.id,
         trade.tokenAddress as Address,
-        entryPrice,
+        entryValueUsdc,
         tp,
         sl,
-        trade.buyAmountEth ?? '0',
+        config.slippagePercent,
+        config.maxGasGwei,
       ).catch((err) =>
         logger.error({ err, tradeId: trade.id }, 'TP/SL recovery monitor error'),
       );
 
-      logger.info({ tradeId: trade.id, token: trade.tokenAddress, tp, sl }, 'TP/SL monitor recovered');
+      logger.info({ tradeId: trade.id, token: trade.tokenAddress, tp, sl, entryValueUsdc }, 'TP/SL monitor recovered');
     }
   } catch (err) {
     logger.error({ err }, 'TP/SL recovery failed — monitors not restarted');
