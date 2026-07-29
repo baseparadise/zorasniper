@@ -504,7 +504,9 @@ async function executeZoraSwapTx(params: {
   // that means the tx body is bad (invalid signature, slippage exceeded, etc.) and WILL revert
   // on-chain. Do NOT waste gas — throw immediately so the caller can fall back to Li.Fi.
   // Only use the 500k fallback for node/network-level errors (timeout, RPC unavailable, etc.).
-  const maxFeeCapWei = BigInt(Math.round(maxGasGwei * 1e9));
+  // maxGasGwei kept as param for backward compat but no longer used as a hard cap.
+  // Gas price is fully automatic: use whatever the network estimates.
+  // Base fees are consistently cheap (< 0.01 gwei) so no cap is needed.
   let feeEstimate: { maxFeePerGas: bigint; maxPriorityFeePerGas: bigint };
   let estimatedGas: bigint;
   try {
@@ -549,8 +551,8 @@ async function executeZoraSwapTx(params: {
     feeEstimate = await publicClient.estimateFeesPerGas();
     estimatedGas = 500_000n;
   }
-  const maxFeePerGas =
-    feeEstimate.maxFeePerGas < maxFeeCapWei ? feeEstimate.maxFeePerGas : maxFeeCapWei;
+  // Use network-estimated fee directly — no manual cap.
+  const maxFeePerGas = feeEstimate.maxFeePerGas;
   const maxPriorityFeePerGas =
     feeEstimate.maxPriorityFeePerGas < maxFeePerGas
       ? feeEstimate.maxPriorityFeePerGas
@@ -1045,8 +1047,9 @@ export async function executeBuy(params: TradeParams): Promise<void> {
       throw new Error(`Simulation reverted — aborting buy: ${msg}`);
     }
 
-    // ── Step 3: EIP-1559 gas — cap at user-configured maxGasGwei ─────────────
-    const maxFeeCapWei = BigInt(Math.round(maxGasGwei * 1e9));
+    // ── Step 3: EIP-1559 gas — fully automatic, pakai estimasi network ───────
+    // maxGasGwei tidak lagi dipakai sebagai cap. Base fee selalu murah
+    // sehingga cukup percayakan estimasi langsung ke node.
     const [feeEstimate, estimatedGas] = await Promise.all([
       publicClient.estimateFeesPerGas(),
       publicClient.estimateGas({
@@ -1056,8 +1059,7 @@ export async function executeBuy(params: TradeParams): Promise<void> {
         account: account.address,
       }),
     ]);
-    const maxFeePerGas =
-      feeEstimate.maxFeePerGas < maxFeeCapWei ? feeEstimate.maxFeePerGas : maxFeeCapWei;
+    const maxFeePerGas = feeEstimate.maxFeePerGas;
     const maxPriorityFeePerGas =
       feeEstimate.maxPriorityFeePerGas < maxFeePerGas
         ? feeEstimate.maxPriorityFeePerGas
