@@ -18,6 +18,16 @@ import {
 import zoraLogo from "@/assets/zora-logo.png";
 import basescanLogo from "@/assets/basescan-logo.png";
 
+function formatUsd(val: number): string {
+  if (val === 0) return "—";
+  if (val < 0.000001) return `$${val.toExponential(3)}`;
+  if (val < 0.01) return `$${val.toFixed(6)}`;
+  if (val < 1) return `$${val.toFixed(4)}`;
+  if (val >= 1_000_000) return `$${(val / 1_000_000).toFixed(2)}M`;
+  if (val >= 1_000) return `$${(val / 1_000).toFixed(2)}K`;
+  return `$${val.toFixed(2)}`;
+}
+
 // ── Token preview card ─────────────────────────────────────────────────────
 
 function TokenPreview({ address }: { address: string }) {
@@ -48,16 +58,6 @@ function TokenPreview({ address }: { address: string }) {
   const priceUsdNum = parseFloat(data.priceUsd ?? "0");
   const mcUsdNum = parseFloat(data.mcUsd ?? "0");
   const walletNum = parseFloat(data.walletBalance);
-
-  function formatUsd(val: number): string {
-    if (val === 0) return "—";
-    if (val < 0.000001) return `$${val.toExponential(3)}`;
-    if (val < 0.01) return `$${val.toFixed(6)}`;
-    if (val < 1) return `$${val.toFixed(4)}`;
-    if (val >= 1_000_000) return `$${(val / 1_000_000).toFixed(2)}M`;
-    if (val >= 1_000) return `$${(val / 1_000).toFixed(2)}K`;
-    return `$${val.toFixed(2)}`;
-  }
 
   return (
     <div className="rounded-2xl border border-violet-500/20 bg-violet-500/5 p-4 space-y-3">
@@ -108,6 +108,33 @@ function TokenPreview({ address }: { address: string }) {
 
 function PositionCard({ position, onRefresh }: { position: any; onRefresh: () => void }) {
   const { trade, currentBalanceTokens, currentValueEth, pnlPercent, entryPriceEth } = position;
+
+  // Live token price/MC — refreshed every 30 s (same Zora API as TokenPreview above)
+  const { data: tokenInfo } = useGetTokenInfo(trade.tokenAddress as string, {
+    query: { refetchInterval: 30_000 },
+  });
+
+  // Real-time USD value: balance × current market price
+  const liveValueUsd = (() => {
+    if (!tokenInfo) return null;
+    const bal = parseFloat(tokenInfo.walletBalance ?? "0");
+    const price = parseFloat(tokenInfo.priceUsd ?? "0");
+    if (bal <= 0 || price <= 0) return null;
+    return bal * price;
+  })();
+
+  // PnL% vs USD cost basis (entryValueUsdc); fallback to ETH-based pnlPercent from backend
+  const livePnlPct = (() => {
+    if (liveValueUsd === null) return pnlPercent;
+    const entryUsdc = trade.entryValueUsdc ? parseFloat(trade.entryValueUsdc) : null;
+    if (!entryUsdc || entryUsdc <= 0) return pnlPercent;
+    return ((liveValueUsd - entryUsdc) / entryUsdc) * 100;
+  })();
+  const livePnlPositive = livePnlPct > 0;
+  const livePnlZero = Math.abs(livePnlPct) < 0.01;
+
+  const livePriceUsd = tokenInfo ? parseFloat(tokenInfo.priceUsd ?? "0") : null;
+  const liveMcUsd = tokenInfo ? parseFloat(tokenInfo.mcUsd ?? "0") : null;
   const pnlPositive = pnlPercent > 0;
   const pnlZero = pnlPercent === 0;
 
@@ -222,7 +249,25 @@ function PositionCard({ position, onRefresh }: { position: any; onRefresh: () =>
         </div>
       </div>
 
-      {/* Stats grid */}
+      {/* Price / MC — live from Zora /coin API, refreshed every 30 s */}
+      {tokenInfo && (
+        <div className="grid grid-cols-2 gap-2">
+          <div className="rounded-xl bg-white/5 p-2.5">
+            <p className="text-white/30 text-[10px] uppercase tracking-wider mb-1">Price</p>
+            <p className="text-white font-mono text-xs font-semibold">
+              {livePriceUsd !== null && livePriceUsd > 0 ? formatUsd(livePriceUsd) : "—"}
+            </p>
+          </div>
+          <div className="rounded-xl bg-white/5 p-2.5">
+            <p className="text-white/30 text-[10px] uppercase tracking-wider mb-1">MC</p>
+            <p className="text-white font-mono text-xs font-semibold">
+              {liveMcUsd !== null && liveMcUsd > 0 ? formatUsd(liveMcUsd) : "—"}
+            </p>
+          </div>
+        </div>
+      )}
+
+      {/* Entry / Est. Value (USD real-time = balance × price) */}
       <div className="grid grid-cols-2 gap-2">
         <div className="rounded-xl bg-white/5 p-2.5">
           <p className="text-white/30 text-[10px] uppercase tracking-wider mb-1">Entry</p>
@@ -236,14 +281,16 @@ function PositionCard({ position, onRefresh }: { position: any; onRefresh: () =>
         <div className="rounded-xl bg-white/5 p-2.5">
           <p className="text-white/30 text-[10px] uppercase tracking-wider mb-1">Est. Value</p>
           <p className="text-white font-mono text-xs font-semibold">
-            {parseFloat(currentValueEth) > 0 ? `${formatEth(currentValueEth)} ETH` : "—"}
+            {liveValueUsd !== null ? formatUsd(liveValueUsd) : "—"}
           </p>
-          {!pnlZero && (
-            <p className={cn("text-[10px] font-mono mt-0.5", pnlPositive ? "text-green-400" : "text-red-400")}>
-              {pnlPositive ? "+" : ""}{pnlPercent.toFixed(2)}%
+          {!livePnlZero && (
+            <p className={cn("text-[10px] font-mono mt-0.5", livePnlPositive ? "text-green-400" : "text-red-400")}>
+              {livePnlPositive ? "+" : ""}{livePnlPct.toFixed(2)}%
             </p>
           )}
         </div>
+      </div>
+
       </div>
 
       {/* Balance + TP/SL badges */}
