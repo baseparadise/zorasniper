@@ -272,27 +272,31 @@ async function fetchZoraQuote(params: {
 
 /**
  * Probe current token price (ETH per token) via the Zora Quote API.
- * Mirrors fetchZoraPriceProbe from trader.ts.
  *
  * Strategy:
- * 1. Tiny buy quote (PROBE_ETH_WEI → token) — parse amountOut from response.
+ * 1. Sell-direction quote (token → USDC) — same endpoint/direction as the TP/SL monitor.
+ *    If this works, the monitor will work too; if it fails here, the monitor would also fail.
+ *    Uses probeAmountWei (wallet balance if held, else 1 token) to derive price per token,
+ *    then converts USDC → ETH via a 1 ETH → USDC rate probe.
  * 2. Fallback: GET /coin endpoint for indexed price data.
  *
  * Returns null if the price cannot be determined (new pool, API issue, etc.).
  */
-async function fetchZoraPriceProbe(tokenAddress: string, sender: string): Promise<number | null> {
+async function fetchZoraPriceProbe(tokenAddress: string, sender: string, probeAmountWei: bigint): Promise<number | null> {
   const headers: Record<string, string> = { "Content-Type": "application/json" };
   const _apiKey = nextZoraKey();
   if (_apiKey) headers["x-api-key"] = _apiKey;
 
-  // ── Strategy 1: buy-direction quote probe ─────────────────────────────
+  // ── Strategy 1: sell-direction quote (mirrors TP/SL monitor) ──────────
+  // token → USDC, same Zora endpoint as monitorTpSlSniper/fetchCurrentValueUsdc.
+  // Serving as a live canary: if this passes, the monitor's price check will too.
   try {
     const body = JSON.stringify({
       chainId: base.id,
-      tokenIn: { type: "eth" },
-      tokenOut: { type: "erc20", address: tokenAddress.toLowerCase() },
-      amountIn: PROBE_ETH_WEI.toString(),
-      slippage: 0.5, // generous — probe only, not executed
+      tokenIn: { type: "erc20", address: tokenAddress.toLowerCase() },
+      tokenOut: { type: "erc20", address: USDC_BASE.toLowerCase() },
+      amountIn: probeAmountWei.toString(),
+      slippage: 0.5,
       sender: sender.toLowerCase(),
       recipient: sender.toLowerCase(),
     });
@@ -301,18 +305,43 @@ async function fetchZoraPriceProbe(tokenAddress: string, sender: string): Promis
 
     if (res.ok) {
       const data = await res.json();
-      // Zora API returns amountOut inside the `quote` sub-object
-      const amountOutStr: string | undefined = data.quote?.amountOut;
+      const usdcOutStr: string | undefined = data.quote?.amountOut;
 
-      if (amountOutStr) {
-        const tokens = parseFloat(formatUnits(BigInt(amountOutStr), 18));
-        if (tokens > 0) {
-          return parseFloat(formatEther(PROBE_ETH_WEI)) / tokens;
+      if (usdcOutStr && usdcOutStr !== "0") {
+        const usdcOut = parseFloat(formatUnits(BigInt(usdcOutStr), USDC_DECIMALS));
+        const probeTokens = parseFloat(formatUnits(probeAmountWei, 18));
+        if (usdcOut > 0 && probeTokens > 0) {
+          const priceUsdc = usdcOut / probeTokens; // USDC per token
+
+          // Convert USDC → ETH: get how much USDC 1 ETH buys via Zora
+          const ethUsdcRes = await fetch(`${ZORA_QUOTE_API}/quote`, {
+            method: "POST",
+            headers,
+            body: JSON.stringify({
+              chainId: base.id,
+              tokenIn: { type: "eth" },
+              tokenOut: { type: "erc20", address: USDC_BASE.toLowerCase() },
+              amountIn: parseEther("1").toString(),
+              slippage: 0.5,
+              sender: sender.toLowerCase(),
+              recipient: sender.toLowerCase(),
+            }),
+          });
+          if (ethUsdcRes.ok) {
+            const ethUsdcData = await ethUsdcRes.json();
+            const usdcPerEthStr: string | undefined = ethUsdcData.quote?.amountOut;
+            if (usdcPerEthStr) {
+              const usdcPerEth = parseFloat(formatUnits(BigInt(usdcPerEthStr), USDC_DECIMALS));
+              if (usdcPerEth > 0) {
+                return priceUsdc / usdcPerEth; // ETH per token
+              }
+            }
+          }
         }
       }
     }
   } catch (err) {
-    logger.warn({ err, tokenAddress }, "Zora price probe (buy-quote path) failed");
+    logger.warn({ err, tokenAddress }, "Zora price probe (sell-direction) failed");
   }
 
   // ── Strategy 2: /coin indexed price ───────────────────────────────────
@@ -767,30 +796,13 @@ async function monitorTpSl(
         return;
       }
 
-      // ── Price probe: Zora first, Li.Fi fallback ──────────────────────────
+      // ── Price probe: sell-direction Zora (same as TP/SL monitor in trader.ts) ──
+      // Using 1-token probe so this is consistent with how the sniper monitor works.
       let currentPrice: number | null = null;
 
-      // 1. Try Zora price probe (works for Zora Coins, new or established)
-      const zoraPrice = await fetchZoraPriceProbe(tokenAddress, probeAccount);
+      const zoraPrice = await fetchZoraPriceProbe(tokenAddress, probeAccount, parseUnits("1", 18));
       if (zoraPrice !== null) {
         currentPrice = zoraPrice;
-      } else {
-        // 2. Li.Fi fallback probe (for tokens bought via Li.Fi)
-        try {
-          const probeQuote = await getLiFiQuote(
-            ETH_ADDRESS,
-            tokenAddress,
-            parseEther(PROBE_AMOUNT_ETH),
-            probeAccount,
-            5,
-          );
-          const probeTokens = parseFloat(formatUnits(BigInt(probeQuote.estimate.toAmount), 18));
-          if (probeTokens > 0) {
-            currentPrice = parseFloat(PROBE_AMOUNT_ETH) / probeTokens;
-          }
-        } catch {
-          // Both APIs unavailable — skip this cycle
-        }
       }
 
       if (currentPrice === null) continue;
@@ -1328,21 +1340,10 @@ router.post("/trades/manual-buy", async (req, res): Promise<void> => {
     let probeAccount: Address;
     try { probeAccount = privateKeyToAccount(getWalletKey()).address; } catch { probeAccount = ZERO_ADDRESS; }
 
-    // 1. Try Zora price probe (exact same logic as sniper)
-    const zoraPrice = await fetchZoraPriceProbe(addr, probeAccount);
+    // Sell-direction Zora probe (same as TP/SL monitor). Pre-buy so no balance held yet — probe 1 token.
+    const zoraPrice = await fetchZoraPriceProbe(addr, probeAccount, parseUnits("1", 18));
     if (zoraPrice !== null) {
       entryPriceEth = zoraPrice;
-    } else {
-      // 2. Li.Fi fallback probe
-      const probeQuote = await getLiFiQuote(
-        ETH_ADDRESS,
-        addr,
-        parseEther("0.0001"),
-        probeAccount,
-        slippagePercent,
-      );
-      const probeTokens = parseFloat(formatUnits(BigInt(probeQuote.estimate.toAmount), 18));
-      if (probeTokens > 0) entryPriceEth = 0.0001 / probeTokens;
     }
   } catch {
     /* price probe failed — entry price stays 0 */
@@ -1525,9 +1526,10 @@ router.get("/token/:address", async (req, res): Promise<void> => {
     ]);
 
     let walletBalance = "0";
+    let rawBal = 0n;
     try {
       const account = privateKeyToAccount(getWalletKey());
-      const rawBal = await publicClient.readContract({
+      rawBal = await publicClient.readContract({
         address: addr,
         abi: ERC20_ABI,
         functionName: "balanceOf",
@@ -1538,35 +1540,21 @@ router.get("/token/:address", async (req, res): Promise<void> => {
       /* no wallet configured */
     }
 
-    // ── Price estimation: Zora first, Li.Fi fallback ────────────────────
+    // ── Price estimation: sell-direction Zora probe (same as TP/SL monitor) ──
+    // Use actual wallet balance if held; otherwise probe with 1 token.
+    // This ensures token info fetch is a live canary for monitor health.
     let priceEth = "0";
     let mcEth = "0";
     try {
       let probeAccount: Address;
       try { probeAccount = privateKeyToAccount(getWalletKey()).address; } catch { probeAccount = ZERO_ADDRESS; }
 
-      // 1. Try Zora price probe
-      const zoraPrice = await fetchZoraPriceProbe(addr, probeAccount);
+      const probeAmountWei = rawBal > 0n ? rawBal : parseUnits("1", 18);
+      const zoraPrice = await fetchZoraPriceProbe(addr, probeAccount, probeAmountWei);
       if (zoraPrice !== null) {
         priceEth = zoraPrice.toFixed(18);
         const mcNum = parseFloat(formatUnits(totalSupply as bigint, 18)) * zoraPrice;
         mcEth = mcNum.toFixed(6);
-      } else {
-        // 2. Li.Fi fallback probe
-        const probeQuote = await getLiFiQuote(
-          ETH_ADDRESS,
-          addr,
-          parseEther("0.0001"),
-          probeAccount,
-          5,
-        );
-        const probeTokens = parseFloat(formatUnits(BigInt(probeQuote.estimate.toAmount), 18));
-        if (probeTokens > 0) {
-          const priceNum = 0.0001 / probeTokens;
-          priceEth = priceNum.toFixed(18);
-          const mcNum = parseFloat(formatUnits(totalSupply as bigint, 18)) * priceNum;
-          mcEth = mcNum.toFixed(6);
-        }
       }
     } catch {
       /* pool not yet active or no route available */
@@ -1640,25 +1628,14 @@ router.get("/positions", async (_req, res): Promise<void> => {
       let pnlPercent = 0;
 
       if (balNum > 0 && entryPriceNum > 0) {
-        // ── Price probe: Zora first, Li.Fi fallback ──────────────────────
+        // ── Price probe: sell-direction Zora (same as TP/SL monitor) ──────
+        // Use actual rawBal so price impact matches the real position size.
         try {
           let currentPrice: number | null = null;
 
-          const zoraPrice = await fetchZoraPriceProbe(addr, walletAddress);
+          const zoraPrice = await fetchZoraPriceProbe(addr, walletAddress, rawBal);
           if (zoraPrice !== null) {
             currentPrice = zoraPrice;
-          } else {
-            const probeQuote = await getLiFiQuote(
-              ETH_ADDRESS,
-              addr,
-              parseEther("0.0001"),
-              walletAddress,
-              5,
-            );
-            const probeTokens = parseFloat(formatUnits(BigInt(probeQuote.estimate.toAmount), 18));
-            if (probeTokens > 0) {
-              currentPrice = 0.0001 / probeTokens;
-            }
           }
 
           if (currentPrice !== null) {
