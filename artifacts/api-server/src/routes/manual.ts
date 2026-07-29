@@ -1549,59 +1549,41 @@ router.get("/token/:address", async (req, res): Promise<void> => {
 
     const name: string = token.name ?? "Unknown";
     const symbol: string = token.symbol ?? "?";
-    // totalSupply may be a raw integer string (18 decimals) or already formatted
-    const totalSupplyRaw: string = String(token.totalSupply ?? "0");
-    let totalSupply = "0";
-    try {
-      totalSupply = /\./.test(totalSupplyRaw)
-        ? totalSupplyRaw
-        : formatUnits(BigInt(totalSupplyRaw), 18);
-    } catch {
-      totalSupply = totalSupplyRaw;
-    }
+    const totalSupply: string = String(token.totalSupply ?? "0");
 
-    // ── Price: priceInUsdc → ETH ──────────────────────────────────────────
-    // Zora API returns price in USDC; convert to ETH via a quick 1-ETH probe.
+    // ── Price & Market Cap: read directly from Zora SDK API fields ────────
+    //
+    // tokenPrice.priceInPoolToken = price per token in the pool currency (ETH on Base).
+    //   No conversion needed — this is already the ETH price.
+    //
+    // tokenPrice.priceInUsdc = price per token in USDC.
+    //
+    // marketCap = market cap expressed in USD (same unit as priceInUsdc).
+    //   Convert to ETH: marketCap_usd * (priceInPoolToken / priceInUsdc)
+    //   = marketCap * (ETH_per_token / USDC_per_token)
+    //   = marketCap * (1 / ETH_price_in_USD)
+    //   = marketCap_ETH
     let priceEth = "0";
     let mcEth = "0";
-    const priceInUsdc: string | undefined =
-      token?.tokenPrice?.priceInUsdc ??
-      token?.price?.usdc ??
-      token?.marketPrice;
 
-    if (priceInUsdc) {
-      const tokenPriceUsdc = parseFloat(priceInUsdc);
-      if (tokenPriceUsdc > 0) {
-        try {
-          const ethUsdcRes = await fetch(`${ZORA_QUOTE_API}/quote`, {
-            method: "POST",
-            headers: coinHeaders,
-            body: JSON.stringify({
-              chainId: BASE_CHAIN_ID,
-              tokenIn: { type: "eth" },
-              tokenOut: { type: "erc20", address: USDC_BASE.toLowerCase() },
-              amountIn: parseEther("1").toString(),
-              slippage: 0.5,
-              sender: ZERO_ADDRESS,
-              recipient: ZERO_ADDRESS,
-            }),
-          });
-          if (ethUsdcRes.ok) {
-            const ethUsdcData = await ethUsdcRes.json();
-            const usdcPerEthStr: string | undefined = ethUsdcData.quote?.amountOut;
-            if (usdcPerEthStr) {
-              const usdcPerEth = parseFloat(formatUnits(BigInt(usdcPerEthStr), USDC_DECIMALS));
-              if (usdcPerEth > 0) {
-                const ethPrice = tokenPriceUsdc / usdcPerEth;
-                priceEth = ethPrice.toFixed(18);
-                const mcNum = parseFloat(totalSupply) * ethPrice;
-                mcEth = mcNum.toFixed(6);
-              }
-            }
-          }
-        } catch {
-          /* ETH/USDC probe failed — leave priceEth as 0 */
-        }
+    const priceInPoolToken: string | undefined = token?.tokenPrice?.priceInPoolToken;
+    const priceInUsdc: string | undefined = token?.tokenPrice?.priceInUsdc;
+    const marketCapRaw: string | undefined = token?.marketCap;
+
+    const pricePoolFloat = priceInPoolToken ? parseFloat(priceInPoolToken) : 0;
+    const priceUsdcFloat = priceInUsdc ? parseFloat(priceInUsdc) : 0;
+
+    if (pricePoolFloat > 0) {
+      priceEth = pricePoolFloat.toFixed(18);
+    }
+
+    if (pricePoolFloat > 0 && priceUsdcFloat > 0 && marketCapRaw) {
+      const marketCapUsd = parseFloat(marketCapRaw);
+      if (marketCapUsd > 0) {
+        // ETH per dollar = priceInPoolToken / priceInUsdc
+        const ethPerDollar = pricePoolFloat / priceUsdcFloat;
+        const mcNum = marketCapUsd * ethPerDollar;
+        mcEth = mcNum.toFixed(6);
       }
     }
 
