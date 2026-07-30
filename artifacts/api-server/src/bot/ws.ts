@@ -1,13 +1,37 @@
 import { WebSocketServer, WebSocket } from "ws";
 import type { IncomingMessage, Server } from "http";
 import { logger } from "../lib/logger";
+import { COOKIE_NAME, validateSession } from "../middlewares/auth";
 
 let wss: WebSocketServer | null = null;
+
+/** Parse a raw Cookie header string into a key→value map. */
+function parseCookies(cookieHeader: string): Record<string, string> {
+  const out: Record<string, string> = {};
+  for (const part of cookieHeader.split(";")) {
+    const idx = part.indexOf("=");
+    if (idx < 0) continue;
+    const key = part.slice(0, idx).trim();
+    const val = part.slice(idx + 1).trim();
+    out[key] = val;
+  }
+  return out;
+}
 
 export function startWsServer(server: Server): void {
   wss = new WebSocketServer({ server, path: "/api/ws" });
 
   wss.on("connection", (ws: WebSocket, req: IncomingMessage) => {
+    // ── Auth check — reject unauthenticated WebSocket connections ──────────
+    const cookies = parseCookies(req.headers.cookie ?? "");
+    const token = cookies[COOKIE_NAME];
+
+    if (!validateSession(token)) {
+      logger.warn({ ip: req.socket.remoteAddress }, "WS connection rejected — unauthorized");
+      ws.close(1008, "Unauthorized");
+      return;
+    }
+
     logger.info({ ip: req.socket.remoteAddress }, "WS client connected");
 
     ws.on("close", () => {

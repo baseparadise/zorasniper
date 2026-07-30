@@ -23,6 +23,9 @@ export const tradesTable = pgTable("trades", {
   source: text("source").notNull().default("sniper"), // 'sniper' | 'manual'
   takeProfitPercent: text("take_profit_percent"),
   stopLossPercent: text("stop_loss_percent"),
+  // ETH-per-token price at entry (buyAmountEth / tokensReceived).
+  // Stored for reference; TP/SL monitoring uses entryValueUsdc instead.
+  entryPriceEth: text("entry_price_eth"),
   // USDC value of token position at time of buy (from sell-direction quote post-buy).
   // Used as the TP/SL cost basis: more accurate than ETH_spent / tokens_received
   // because it reflects actual market value after price impact and fees.
@@ -35,4 +38,3 @@ export const insertTradeSchema = createInsertSchema(tradesTable).omit({
 });
 export type InsertTrade = z.infer<typeof insertTradeSchema>;
 export type Trade = typeof tradesTable.$inferSelect;
-

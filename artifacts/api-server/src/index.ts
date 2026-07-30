@@ -20,6 +20,11 @@ if (Number.isNaN(port) || port <= 0) {
   throw new Error(`Invalid PORT value: "${rawPort}"`);
 }
 
+// Warn early if ALCHEMY_RPC_URL is missing — the bot will fail to start without it.
+if (!process.env.ALCHEMY_RPC_URL || process.env.ALCHEMY_RPC_URL.trim() === "") {
+  logger.warn("ALCHEMY_RPC_URL is not set — the sniper bot will fail to connect when started");
+}
+
 /**
  * Lightweight migration runner.
  *
@@ -142,6 +147,8 @@ applyMigrations()
     // Restart TP/SL monitors for confirmed trades that survived a redeploy.
     // Manual trades (Li.Fi monitor) and sniper trades (Zora API monitor)
     // are recovered separately because they use different price probes.
+    // Note: recoverSniperTpSlMonitors has an internal guard flag — calling it
+    // here and again inside startSniper() is safe; the second call is a no-op.
     recoverTpSlMonitors().catch((err) =>
       logger.error({ err }, 'Manual TP/SL startup recovery failed'),
     );

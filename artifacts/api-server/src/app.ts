@@ -29,7 +29,18 @@ app.use(
     },
   }),
 );
-app.use(cors());
+
+// Restrict CORS to the configured origin (or reflect the request origin in dev).
+// Set ALLOWED_ORIGIN in production to the exact frontend domain.
+// credentials:true is required so the session cookie is sent cross-origin (e.g. dev).
+const allowedOrigin = process.env.ALLOWED_ORIGIN;
+app.use(
+  cors({
+    credentials: true,
+    origin: allowedOrigin || ((origin, cb) => cb(null, origin ?? false)),
+  }),
+);
+
 app.use(cookieParser());
 app.use(express.json());
 app.use(express.urlencoded({ extended: true }));

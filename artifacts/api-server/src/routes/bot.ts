@@ -51,10 +51,10 @@ router.post("/bot/start", async (req, res): Promise<void> => {
   }
 });
 
-router.post("/bot/stop", (_req, res): Promise<void> => {
+// Synchronous stop — no async needed; stopSniper() is synchronous.
+router.post("/bot/stop", (_req, res): void => {
   stopSniper();
   res.json(StopBotResponse.parse(buildStatusResponse()));
-  return Promise.resolve();
 });
 
 export default router;

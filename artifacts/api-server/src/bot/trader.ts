@@ -1208,12 +1208,21 @@ export async function monitorTpSlSniper(
   }
 }
 
+
+// Guard flag: prevents double execution when both index.ts and startSniper() call this
+// function in the same server lifetime (e.g. bot started right after boot).
+let sniperTpSlRecovered = false;
 /**
  * On server restart, re-attach Zora-based TP/SL monitors for confirmed sniper
  * trades that still have TP or SL set. Mirrors recoverTpSlMonitors in
  * routes/manual.ts but targets source='sniper' and uses the Zora API monitor.
  */
 export async function recoverSniperTpSlMonitors(): Promise<void> {
+  if (sniperTpSlRecovered) {
+    logger.info("Sniper TP/SL recovery: already done, skipping duplicate call");
+    return;
+  }
+  sniperTpSlRecovered = true;
   try {
     // Reset any trades stuck in "selling" — these were mid-sell when the server
     // crashed.  The sell tx may or may not have landed on-chain; the monitor

@@ -3,6 +3,7 @@ import {
   COOKIE_NAME,
   createSession,
   destroySession,
+  safeStringEqual,
 } from "../middlewares/auth";
 
 const SESSION_TTL_MS = 30 * 24 * 60 * 60 * 1000;
@@ -21,7 +22,8 @@ publicAuthRouter.post("/auth/login", (req, res) => {
     return;
   }
 
-  if (!password || password !== expected) {
+  // Use constant-time comparison to prevent timing-based password enumeration.
+  if (!password || !safeStringEqual(password, expected)) {
     res.status(401).json({ error: "Wrong password" });
     return;
   }
