@@ -336,8 +336,11 @@ async function handleCoinCreated(params: {
     slippagePercent: effectiveSlippage,
     maxGasGwei: effectiveMaxGas,
     eventName,
-    takeProfitPercent: config.takeProfitPercent,
-    stopLossPercent: config.stopLossPercent,
+    // Fix: TP/SL used to apply regardless of the "Auto-Sell Enabled" toggle —
+    // the flag was saved but never read here, so turning it off in Settings
+    // did nothing if TP/SL values were still stored from an earlier session.
+    takeProfitPercent: config.autoSell ? config.takeProfitPercent : null,
+    stopLossPercent: config.autoSell ? config.stopLossPercent : null,
   }).catch((err) => logger.error({ err }, "executeBuy error"));
 }
 

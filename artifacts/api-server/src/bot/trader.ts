@@ -1053,6 +1053,16 @@ export function getWalletAddress(): string | null {
  * Executes sell via 0x AllowanceHolder → Li.Fi when TP or SL is hit.
  * Retries sell up to 3 times on failure before giving up.
  */
+// ── Monitor generation guard ─────────────────────────────────────────────
+// Fix: editing TP/SL on a position that already has a monitor running used
+// to spawn a SECOND concurrent loop without stopping the first. The old
+// monitor kept polling with its stale TP/SL values (they're captured as
+// function params, not re-read from DB), so a position could still sell at
+// the OLD threshold moments after the user changed it. Each call now claims
+// a generation token for the tradeId; a monitor exits as soon as it is no
+// longer the latest generation, so at most one monitor is ever active.
+const monitorGeneration = new Map<number, symbol>();
+
 export async function monitorTpSlSniper(
   tradeId: number,
   tokenAddress: Address,
@@ -1063,6 +1073,9 @@ export async function monitorTpSlSniper(
   maxGasGwei: number,
 ): Promise<void> {
   if (!takeProfitPercent && !stopLossPercent) return;
+
+  const myGeneration = Symbol(tradeId);
+  monitorGeneration.set(tradeId, myGeneration);
 
   logger.info(
     { tradeId, entryValueUsdc, takeProfitPercent, stopLossPercent },
@@ -1077,10 +1090,25 @@ export async function monitorTpSlSniper(
   let sellAttempts = 0;
   let active = true;
 
+  // Release this generation's claim on the map — only if we still own it.
+  // Called on every terminal exit except "superseded" (where a newer
+  // generation already owns the slot and must not be clobbered).
+  const releaseGeneration = () => {
+    if (monitorGeneration.get(tradeId) === myGeneration) monitorGeneration.delete(tradeId);
+  };
+
   while (active) {
     await new Promise((r) => setTimeout(r, POLL_INTERVAL_MS));
 
     try {
+      // A newer call to monitorTpSlSniper (e.g. user edited TP/SL) has
+      // claimed this tradeId — stop immediately so only one monitor with
+      // the latest thresholds is ever running.
+      if (monitorGeneration.get(tradeId) !== myGeneration) {
+        logger.info({ tradeId }, "Sniper TP/SL monitor: superseded by newer monitor — exiting");
+        return;
+      }
+
       // Bail if trade was already closed externally (manual sell, etc.)
       const [trade] = await db
         .select({ status: tradesTable.status })
@@ -1112,6 +1140,7 @@ export async function monitorTpSlSniper(
           .update(tradesTable)
           .set({ status: "sold", failReason: "Balance zero during TP/SL monitor" })
           .where(eq(tradesTable.id, tradeId));
+        releaseGeneration();
         return;
       }
 
@@ -1161,6 +1190,7 @@ export async function monitorTpSlSniper(
           "Sniper TP/SL: sell already claimed by another process — bailing",
         );
         active = false;
+        releaseGeneration();
         return;
       }
 
@@ -1182,6 +1212,7 @@ export async function monitorTpSlSniper(
           maxGasGwei,
           reason,
         });
+        releaseGeneration();
       } catch (sellErr) {
         sellAttempts++;
         logger.error(
@@ -1194,6 +1225,7 @@ export async function monitorTpSlSniper(
             .update(tradesTable)
             .set({ status: "failed", failReason: "Max TP/SL sell attempts reached" })
             .where(eq(tradesTable.id, tradeId));
+          releaseGeneration();
           return;
         }
         // Reset to confirmed so the next retry can reclaim the sell

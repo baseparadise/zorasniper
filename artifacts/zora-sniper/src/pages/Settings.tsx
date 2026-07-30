@@ -93,8 +93,14 @@ export default function Settings() {
   }, [config, form]);
 
   const onSubmit = (data: ConfigFormValues) => {
+    // Fix: TP/SL inputs are only hidden (not reset) when Auto-Sell is off, so
+    // stale values from an earlier session used to get submitted anyway.
+    // Clear them here so the UI's toggle state always matches what's saved.
+    const payload = data.autoSell
+      ? data
+      : { ...data, takeProfitPercent: null, stopLossPercent: null };
     updateConfig.mutate(
-      { data },
+      { data: payload },
       {
         onSuccess: (updated) => {
           queryClient.setQueryData(getGetConfigQueryKey(), updated);
