@@ -85,11 +85,16 @@ export async function get0xSellQuote(params: {
   const apiKey = get0xApiKey();
   const headers: Record<string, string> = {
     "Content-Type": "application/json",
+    // 0x v2 requires the version header — without it the API returns
+    // "Unrecognized version header" and ignores the API key.
+    "0x-version": "v2",
+    // chainId also goes in query params; the chain header is legacy.
     "0x-chain-id": String(BASE_CHAIN_ID),
   };
   if (apiKey) headers["0x-api-key"] = apiKey;
 
   const qs = new URLSearchParams({
+    chainId: String(BASE_CHAIN_ID),
     sellToken,
     buyToken,
     sellAmount: sellAmount.toString(),

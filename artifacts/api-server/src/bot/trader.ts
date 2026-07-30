@@ -1183,24 +1183,43 @@ async function executeLiFiSell(params: {
 
   logger.info({ tradeId, reason, method: "lifi" }, "executeLiFiSell: starting Li.Fi fallback");
 
-  const sellQuote = await getLiFiQuote(
+  // Li.Fi is the last-resort aggregator — use a higher minimum slippage than the
+  // config value so that low-cap / low-liquidity Zora tokens don't revert on-chain.
+  // Token price can move 10-20 % between quote and execution for micro-cap tokens.
+  const lifiSlippage = Math.max(slippagePercent, 20);
+
+  // Step 1: Initial quote — used only to discover the approvalAddress.
+  const initialQuote = await getLiFiQuote(
     tokenAddress,
     ETH_ADDRESS,
     tokenBalance,
     account.address,
-    slippagePercent,
+    lifiSlippage,
   );
 
-  if (sellQuote.estimate.approvalAddress) {
+  if (initialQuote.estimate.approvalAddress) {
     await ensureApproval(
       publicClient,
       walletClient,
       account,
       tokenAddress,
-      sellQuote.estimate.approvalAddress as Address,
+      initialQuote.estimate.approvalAddress as Address,
       tokenBalance,
     );
   }
+
+  // Step 2: Re-fetch a FRESH quote right before submission.
+  // Li.Fi quotes encode minAmountOut directly in the calldata; if the price moves
+  // between quote and submit (even by a few seconds), the tx reverts on-chain.
+  // Getting a fresh quote here eliminates that window entirely.
+  logger.info({ tradeId }, "Li.Fi sell: re-fetching fresh quote before submission");
+  const sellQuote = await getLiFiQuote(
+    tokenAddress,
+    ETH_ADDRESS,
+    tokenBalance,
+    account.address,
+    lifiSlippage,
+  );
 
   const { transactionRequest: sellTx } = sellQuote;
   let maxFeePerGas: bigint | undefined;
@@ -1214,9 +1233,9 @@ async function executeLiFiSell(params: {
         : fees.maxFeePerGas;
   } catch { /* let viem fall back to its own estimation */ }
 
-  // Pre-flight ETH balance check for Li.Fi sell
+  // Pre-flight ETH balance check
   const lifiTxValue = BigInt(sellTx.value || "0");
-  const lifiGasLimit = sellTx.gasLimit ? BigInt(sellTx.gasLimit) : 500_000n;
+  const lifiGasLimit = sellTx.gasLimit ? BigInt(sellTx.gasLimit) : 800_000n;
   if (maxFeePerGas) {
     const lifiEstimatedCost = lifiGasLimit * maxFeePerGas + lifiTxValue;
     const lifiEthBalance = await publicClient.getBalance({ address: account.address });
@@ -1229,17 +1248,17 @@ async function executeLiFiSell(params: {
   }
 
   const hash = await walletClient.sendTransaction({
-    to: sellTx.to as Address,
-    data: sellTx.data as `0x${string}`,
-    value: lifiTxValue,
-    gas: sellTx.gasLimit ? BigInt(sellTx.gasLimit) : undefined,
+    to:                sellTx.to as Address,
+    data:              sellTx.data as `0x${string}`,
+    value:             lifiTxValue,
+    gas:               sellTx.gasLimit ? BigInt(sellTx.gasLimit) : undefined,
     maxFeePerGas,
     maxPriorityFeePerGas,
     account,
     chain: base,
   });
 
-  logger.info({ tradeId, hash }, "Li.Fi sell tx submitted");
+  logger.info({ tradeId, hash, lifiSlippage, tool: sellQuote.tool }, "Li.Fi sell tx submitted");
   const receipt = await publicClient.waitForTransactionReceipt({ hash, timeout: 120_000 });
 
   if (receipt.status !== "success") {
