@@ -9,7 +9,7 @@ import {
   type Address,
 } from "viem";
 import { getLiFiQuote, ensureApproval, ETH_ADDRESS } from "../lib/lifi";
-import { get0xSellQuote, get0xAllowanceHolderQuote, ZEROX_NATIVE_ETH } from "../lib/zerox";
+import { get0xAllowanceHolderQuote, ZEROX_NATIVE_ETH } from "../lib/zerox";
 import { base } from "viem/chains";
 import { privateKeyToAccount } from "viem/accounts";
 import { db, tradesTable, creatorsTable } from "@workspace/db";
@@ -54,7 +54,6 @@ const ERC20_ABI = [
 const ZORA_QUOTE_API = "https://api-sdk.zora.engineering";
 
 // Permit2 universal contract address (same on all EVM chains)
-const PERMIT2_ADDRESS = "0x000000000022D473030F116dDEE9F6B43aC78BA3" as Address;
 
 // ── Zora API key rotator ─────────────────────────────────────────────────────
 // Supports multiple keys via ZORA_API_KEYS (comma-separated).
@@ -491,16 +490,16 @@ export async function executeZoraSell(params: {
   maxGasGwei: number;
   reason: string;
 }): Promise<void> {
-  // 1. 0x AllowanceHolder (primary) → 0x Permit2 (fallback) — both inside execute0xSellTrade
+  // 1. 0x AllowanceHolder — primary sell path (standard ERC-20 approve, no EIP-712)
   try {
-    await execute0xSellTrade(params);
+    await execute0xAllowanceHolderSell(params);
     return;
   } catch (zeroxErr) {
     const msg = zeroxErr instanceof Error ? zeroxErr.message : String(zeroxErr);
-    logger.warn({ tradeId: params.tradeId, err: msg }, "0x sell failed — falling back to Li.Fi");
+    logger.warn({ tradeId: params.tradeId, err: msg }, "0x AllowanceHolder failed — falling back to Li.Fi");
   }
 
-  // 2. Li.Fi — last resort
+  // 2. Li.Fi (KyberSwap) — fallback
   await executeLiFiSell(params);
 }
 
@@ -633,208 +632,14 @@ async function execute0xAllowanceHolderSell(params: {
   logger.info({ tradeId, ethReceived, txHash, reason }, "Sell confirmed via 0x AllowanceHolder");
 }
 
-/**
- * Execute a sell via 0x API v2.
- *
- * Tries the AllowanceHolder path first (simpler, no EIP-712, what Zerion uses —
- * works for Zora / Uniswap V4 tokens that the Permit2 path cannot handle).
- * Falls back to the Permit2 path on failure.
- *
- * Throws on any failure so the caller can fall back to Li.Fi.
- */
-async function execute0xSellTrade(params: {
-  tradeId: number;
-  tokenAddress: Address;
-  tokenBalance: bigint;
-  slippagePercent: number;
-  maxGasGwei: number;
-  reason: string;
-}): Promise<void> {
-  // ── AllowanceHolder path — try first (Zerion uses this; works for Zora V4 tokens) ──
-  try {
-    await execute0xAllowanceHolderSell(params);
-    return;
-  } catch (ahErr) {
-    const ahMsg = ahErr instanceof Error ? ahErr.message : String(ahErr);
-    logger.warn(
-      { tradeId: params.tradeId, err: ahMsg },
-      "0x AllowanceHolder failed — trying Permit2 path",
-    );
-  }
-
-  // ── Permit2 path — fallback ───────────────────────────────────────────────
-  const { tradeId, tokenAddress, tokenBalance, slippagePercent, reason } = params;
-  const slippageBps = Math.round(slippagePercent * 100); // e.g. 5% → 500 bps
-
-  const account = privateKeyToAccount(getWalletKey());
-  const httpUrl = getHttpRpcUrl();
-  const publicClient = createPublicClient({ chain: base, transport: http(httpUrl) });
-  const walletClient = createWalletClient({ account, chain: base, transport: http(httpUrl) });
-
-  const logCtx = { tradeId, reason, method: "0x-p2" };
-  logger.info(logCtx, "execute0xSellTrade (Permit2): fetching 0x quote");
-
-  // ── Get 0x quote (token → ETH) ───────────────────────────────────────────
-  const quote = await get0xSellQuote({
-    sellToken: tokenAddress,
-    buyToken: ZEROX_NATIVE_ETH,
-    sellAmount: tokenBalance,
-    taker: account.address,
-    slippageBps,
-  });
-
-  const tx = quote.transaction;
-  let txData: `0x${string}` = tx.data as `0x${string}`;
-
-  // ── Permit2 approval + signature ─────────────────────────────────────────
-  if (quote.permit2?.type === "Permit2" && quote.permit2.eip712) {
-    // 1. Ensure token is approved to the Permit2 contract
-    const permit2Allowance = await publicClient.readContract({
-      address: tokenAddress,
-      abi: ERC20_ABI,
-      functionName: "allowance",
-      args: [account.address, PERMIT2_ADDRESS],
-    });
-    if (permit2Allowance < tokenBalance) {
-      logger.info({ ...logCtx, spender: PERMIT2_ADDRESS }, "0x sell: approving Permit2 contract");
-      const approveTx = await walletClient.writeContract({
-        address: tokenAddress,
-        abi: ERC20_ABI,
-        functionName: "approve",
-        args: [PERMIT2_ADDRESS, maxUint256],
-        chain: base,
-        account,
-      });
-      await publicClient.waitForTransactionReceipt({ hash: approveTx, timeout: 60_000 });
-      logger.info({ ...logCtx, approveTx }, "0x sell: Permit2 approval confirmed");
-    }
-
-    // 2. Sign the EIP-712 Permit2 message
-    const eip712 = quote.permit2.eip712;
-    const signature = await walletClient.signTypedData({
-      account,
-      // eslint-disable-next-line @typescript-eslint/no-explicit-any
-      domain: eip712.domain as any,
-      // eslint-disable-next-line @typescript-eslint/no-explicit-any
-      types: eip712.types as any,
-      primaryType: eip712.primaryType,
-      // eslint-disable-next-line @typescript-eslint/no-explicit-any
-      message: eip712.message as any,
-    });
-
-    // 3. Append signature (without 0x prefix) to tx data — 0x v2 convention
-    txData = (tx.data + signature.slice(2)) as `0x${string}`;
-    logger.info({ ...logCtx, sigLength: signature.length }, "0x sell: Permit2 signature appended");
-
-  } else {
-    // AllowanceHolder path — traditional ERC-20 approve(spender, amount)
-    const spenderAddress = (quote.issues?.allowance?.spender ?? tx.to) as Address;
-    if (spenderAddress) {
-      const allowance = await publicClient.readContract({
-        address: tokenAddress,
-        abi: ERC20_ABI,
-        functionName: "allowance",
-        args: [account.address, spenderAddress],
-      });
-      if (allowance < tokenBalance) {
-        logger.info({ ...logCtx, spender: spenderAddress }, "0x sell: approving AllowanceHolder spender");
-        const approveTx = await walletClient.writeContract({
-          address: tokenAddress,
-          abi: ERC20_ABI,
-          functionName: "approve",
-          args: [spenderAddress, maxUint256],
-          chain: base,
-          account,
-        });
-        await publicClient.waitForTransactionReceipt({ hash: approveTx, timeout: 60_000 });
-        logger.info({ ...logCtx, approveTx }, "0x sell: AllowanceHolder approval confirmed");
-      }
-    }
-  }
-
-  // ── Gas estimation ───────────────────────────────────────────────────────
-  const fees = await publicClient.estimateFeesPerGas();
-  const txValue = toBigIntSafe(tx.value);
-
-  let estimatedGas: bigint;
-  try {
-    estimatedGas = await publicClient.estimateGas({
-      to: tx.to as Address,
-      data: txData,
-      value: txValue,
-      account: account.address,
-    });
-  } catch (gasErr) {
-    const gasErrMsg = gasErr instanceof Error ? gasErr.message : String(gasErr);
-    throw new Error(`0x sell gas estimation failed (tx likely to revert): ${gasErrMsg.slice(0, 300)}`);
-  }
-
-  const gasLimit = (estimatedGas * 120n) / 100n;
-  const maxFeePerGas = fees.maxFeePerGas;
-  const maxPriorityFeePerGas =
-    fees.maxPriorityFeePerGas < maxFeePerGas ? fees.maxPriorityFeePerGas : maxFeePerGas;
-
-  // ── Pre-flight balance check ─────────────────────────────────────────────
-  const ethBalanceBefore = await publicClient.getBalance({ address: account.address });
-  if (ethBalanceBefore < gasLimit * maxFeePerGas + txValue) {
-    throw new Error(
-      `0x sell aborted — insufficient ETH for gas: wallet ${formatEther(ethBalanceBefore)} ETH, ` +
-      `estimated cost ${formatEther(gasLimit * maxFeePerGas)} ETH`,
-    );
-  }
-
-  logger.info(
-    { ...logCtx, estimatedGas: estimatedGas.toString(), gasLimit: gasLimit.toString(), maxFeePerGas: maxFeePerGas.toString() },
-    "0x sell: gas estimated",
-  );
-
-  // ── Submit transaction ───────────────────────────────────────────────────
-  const txHash = await walletClient.sendTransaction({
-    to: tx.to as Address,
-    data: txData,
-    value: txValue,
-    gas: gasLimit,
-    maxFeePerGas,
-    maxPriorityFeePerGas,
-    account,
-    chain: base,
-  });
-
-  logger.info({ ...logCtx, txHash }, "0x sell tx submitted");
-
-  let receipt: Awaited<ReturnType<typeof publicClient.waitForTransactionReceipt>>;
-  try {
-    receipt = await publicClient.waitForTransactionReceipt({ hash: txHash, timeout: 120_000 });
-  } catch (receiptErr) {
-    const baseMsg = receiptErr instanceof Error ? receiptErr.message : String(receiptErr);
-    throw new Error(`0x sell receipt timeout for ${txHash}: ${baseMsg.slice(0, 200)}`);
-  }
-
-  if (receipt.status !== "success") {
-    throw new Error(`0x sell tx reverted on-chain: ${txHash}`);
-  }
-
-  // ── Measure ETH received (balance diff + gas repayment) ──────────────────
-  const gasCostActual = receipt.gasUsed * (receipt.effectiveGasPrice ?? maxFeePerGas);
-  const ethBalanceAfter = await publicClient.getBalance({ address: account.address });
-  const ethReceivedWei = ethBalanceAfter > ethBalanceBefore
-    ? ethBalanceAfter - ethBalanceBefore + gasCostActual
-    : (quote.minBuyAmount ? BigInt(quote.minBuyAmount) : 0n);
-  const ethReceived = formatEther(ethReceivedWei);
-
-  const [updated] = await db
-    .update(tradesTable)
-    .set({ status: "sold", sellTxHash: txHash, sellAmountEth: ethReceived, pnlEth: ethReceived })
-    .where(eq(tradesTable.id, tradeId))
-    .returning();
-
-  broadcast("trade", updated);
-  logger.info({ tradeId, ethReceived, reason }, "Sell confirmed via 0x API (token → ETH)");
-}
 
 /**
- * Sell via Li.Fi (token → ETH) — used as fallback when 0x API fails.
- * Records the result in the trades table and broadcasts the update.
+ * Sell via Li.Fi / KyberSwap (token → ETH) — fallback when 0x AllowanceHolder fails.
+ *
+ * Fix history:
+ *   - Removed forced 20% minimum slippage: OKX routes this token at 1%; forced floor was wrong.
+ *   - Added gas estimation pre-flight: abort immediately if the calldata will revert on-chain,
+ *     same pattern as execute0xAllowanceHolderSell. Prevents burning gas on bad quotes.
  */
 async function executeLiFiSell(params: {
   tradeId: number;
@@ -849,20 +654,15 @@ async function executeLiFiSell(params: {
   const publicClient = createPublicClient({ chain: base, transport: http(httpUrl) });
   const walletClient = createWalletClient({ account, chain: base, transport: http(httpUrl) });
 
-  logger.info({ tradeId, reason, method: "lifi" }, "executeLiFiSell: starting Li.Fi fallback");
+  logger.info({ tradeId, reason, method: "lifi", slippagePercent }, "executeLiFiSell: starting");
 
-  // Li.Fi is the last-resort aggregator — use a higher minimum slippage than the
-  // config value so that low-cap / low-liquidity Zora tokens don't revert on-chain.
-  // Token price can move 10-20 % between quote and execution for micro-cap tokens.
-  const lifiSlippage = Math.max(slippagePercent, 20);
-
-  // Step 1: Initial quote — used only to discover the approvalAddress.
+  // Step 1: Initial quote — used only to discover approvalAddress → approve spender.
   const initialQuote = await getLiFiQuote(
     tokenAddress,
     ETH_ADDRESS,
     tokenBalance,
     account.address,
-    lifiSlippage,
+    slippagePercent,
   );
 
   if (initialQuote.estimate.approvalAddress) {
@@ -877,64 +677,72 @@ async function executeLiFiSell(params: {
   }
 
   // Step 2: Re-fetch a FRESH quote right before submission.
-  // Li.Fi quotes encode minAmountOut directly in the calldata; if the price moves
-  // between quote and submit (even by a few seconds), the tx reverts on-chain.
-  // Getting a fresh quote here eliminates that window entirely.
+  // Li.Fi calldata encodes minAmountOut; price can move during the approval wait.
   logger.info({ tradeId }, "Li.Fi sell: re-fetching fresh quote before submission");
   const sellQuote = await getLiFiQuote(
     tokenAddress,
     ETH_ADDRESS,
     tokenBalance,
     account.address,
-    lifiSlippage,
+    slippagePercent,
   );
 
   const { transactionRequest: sellTx } = sellQuote;
-  let maxFeePerGas: bigint | undefined;
-  let maxPriorityFeePerGas: bigint | undefined;
-  try {
-    const fees = await publicClient.estimateFeesPerGas();
-    maxFeePerGas = fees.maxFeePerGas;
-    maxPriorityFeePerGas =
-      fees.maxPriorityFeePerGas < fees.maxFeePerGas
-        ? fees.maxPriorityFeePerGas
-        : fees.maxFeePerGas;
-  } catch { /* let viem fall back to its own estimation */ }
-
-  // Pre-flight ETH balance check.
-  // KyberSwap routes through Zora V4 / Uniswap V4 pools which are multi-hop and
-  // notoriously expensive.  Li.Fi's own estimate is often ~10-30 % too low, so
-  // we pad to 150 % of the quoted gasLimit.
   const lifiTxValue = BigInt(sellTx.value || "0");
-  const lifiGasLimitRaw = sellTx.gasLimit ? BigInt(sellTx.gasLimit) : 800_000n;
-  const lifiGasLimit = (lifiGasLimitRaw * 150n) / 100n;
-  if (maxFeePerGas) {
-    const lifiEstimatedCost = lifiGasLimit * maxFeePerGas + lifiTxValue;
-    const lifiEthBalance = await publicClient.getBalance({ address: account.address });
-    if (lifiEthBalance < lifiEstimatedCost) {
-      throw new Error(
-        `Li.Fi sell aborted — insufficient ETH for gas: wallet has ${formatEther(lifiEthBalance)} ETH, ` +
-        `estimated cost ~${formatEther(lifiEstimatedCost)} ETH`,
-      );
-    }
+
+  // Step 3: Gas estimation pre-flight — abort early if tx will revert.
+  // Previously this step was missing; Li.Fi would burn gas on stale/bad quotes.
+  let estimatedGas: bigint;
+  try {
+    estimatedGas = await publicClient.estimateGas({
+      to:      sellTx.to as Address,
+      data:    sellTx.data as `0x${string}`,
+      value:   lifiTxValue,
+      account: account.address,
+    });
+  } catch (gasErr) {
+    const msg = gasErr instanceof Error ? gasErr.message : String(gasErr);
+    throw new Error(`Li.Fi sell: tx will revert — aborting before submission. reason: ${msg.slice(0, 300)}`);
   }
 
+  const lifiGasLimit = (estimatedGas * 130n) / 100n; // 30% buffer on actual simulation
+
+  const fees = await publicClient.estimateFeesPerGas();
+  const maxFeePerGas = fees.maxFeePerGas;
+  const maxPriorityFeePerGas =
+    fees.maxPriorityFeePerGas < maxFeePerGas ? fees.maxPriorityFeePerGas : maxFeePerGas;
+
+  // ETH balance check
+  const lifiEthBalance = await publicClient.getBalance({ address: account.address });
+  const lifiEstimatedCost = lifiGasLimit * maxFeePerGas + lifiTxValue;
+  if (lifiEthBalance < lifiEstimatedCost) {
+    throw new Error(
+      `Li.Fi sell aborted — insufficient ETH for gas: wallet has ${formatEther(lifiEthBalance)} ETH, ` +
+      `estimated cost ~${formatEther(lifiEstimatedCost)} ETH`,
+    );
+  }
+
+  logger.info(
+    { tradeId, estimatedGas: estimatedGas.toString(), gasLimit: lifiGasLimit.toString() },
+    "Li.Fi sell: gas estimated — submitting",
+  );
+
   const hash = await walletClient.sendTransaction({
-    to:                sellTx.to as Address,
-    data:              sellTx.data as `0x${string}`,
-    value:             lifiTxValue,
-    gas:               lifiGasLimit,
+    to:                  sellTx.to as Address,
+    data:                sellTx.data as `0x${string}`,
+    value:               lifiTxValue,
+    gas:                 lifiGasLimit,
     maxFeePerGas,
     maxPriorityFeePerGas,
     account,
-    chain: base,
+    chain:               base,
   });
 
-  logger.info({ tradeId, hash, lifiSlippage, tool: sellQuote.tool }, "Li.Fi sell tx submitted");
+  logger.info({ tradeId, hash, tool: sellQuote.tool }, "Li.Fi sell tx submitted");
   const receipt = await publicClient.waitForTransactionReceipt({ hash, timeout: 120_000 });
 
   if (receipt.status !== "success") {
-    throw new Error("Li.Fi sell tx reverted on-chain");
+    throw new Error(`Li.Fi sell tx reverted on-chain: ${hash}`);
   }
 
   const ethRecovered = sellQuote.estimate.toAmountMin
@@ -948,7 +756,7 @@ async function executeLiFiSell(params: {
     .returning();
 
   broadcast("trade", updated);
-  logger.info({ tradeId, ethRecovered, reason }, "Sniper sell confirmed via Li.Fi fallback");
+  logger.info({ tradeId, ethRecovered, reason }, "Sniper sell confirmed via Li.Fi");
 }
 
 // ── executeBuy ─────────────────────────────────────────────────────────────
