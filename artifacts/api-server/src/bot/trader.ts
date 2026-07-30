@@ -551,23 +551,101 @@ async function executeZoraApiSell(params: {
     sender: account.address,
   });
 
-  // Record ETH balance before so we can measure how much ETH was received.
+  // NOTE: we do NOT use executeZoraSwapTx here because it runs strict hex validation
+  // (toHex) on call.data before simulation and gas estimation. Zora sell quotes can
+  // return call.data that fails that check even though the tx itself is valid on-chain.
+  // Instead we handle approval, hex conversion, gas, and submission directly.
+
+  const routerAddress = toHex(call.target) as Address;
+
+  // ── Approval ──────────────────────────────────────────────────────────────
+  const allowance = await publicClient.readContract({
+    address: tokenAddress,
+    abi: ERC20_ABI,
+    functionName: "allowance",
+    args: [account.address, routerAddress],
+  });
+  if (allowance < tokenBalance) {
+    logger.info({ ...logCtx, spender: routerAddress }, "Zora sell: approving router");
+    const approveTx = await walletClient.writeContract({
+      address: tokenAddress,
+      abi: ERC20_ABI,
+      functionName: "approve",
+      args: [routerAddress, maxUint256],
+      chain: base,
+      account,
+    });
+    await publicClient.waitForTransactionReceipt({ hash: approveTx, timeout: 60_000 });
+    logger.info({ ...logCtx }, "Zora sell: approval confirmed");
+  } else {
+    logger.info({ ...logCtx }, "Zora sell: allowance already sufficient");
+  }
+
+  // ── Lenient hex conversion ────────────────────────────────────────────────
+  // Zora sell quotes occasionally return call.data with non-hex characters that
+  // toHex() rejects. Try strict first; fall back to a lenient strip.
+  let callData: `0x${string}`;
+  try {
+    callData = toHex(call.data);
+  } catch {
+    const cleaned = (call.data ?? "").replace(/\s/g, "");
+    callData = (cleaned.startsWith("0x") ? cleaned : `0x${cleaned}`) as `0x${string}`;
+    logger.warn(
+      { ...logCtx, dataLen: cleaned.length },
+      "Zora sell: strict toHex failed — using lenient hex conversion",
+    );
+  }
+
+  const txValue = toBigIntSafe(call.value);
+
+  // ── Gas estimation with fallback ─────────────────────────────────────────
+  // Zora sell simulations on eth_call frequently fail due to pool/block-state
+  // issues even when the real tx succeeds. We always proceed — never abort on a
+  // failed gas estimate the way the buy path does.
+  const fees = await publicClient.estimateFeesPerGas();
+  const maxFeePerGas = fees.maxFeePerGas;
+  const maxPriorityFeePerGas =
+    fees.maxPriorityFeePerGas < maxFeePerGas ? fees.maxPriorityFeePerGas : maxFeePerGas;
+
+  let gasLimit = 500_000n;
+  try {
+    const gas = await publicClient.estimateGas({
+      to: routerAddress,
+      data: callData,
+      value: txValue,
+      account: account.address,
+    });
+    gasLimit = (gas * 130n) / 100n; // 30% buffer
+    logger.info(
+      { ...logCtx, estimatedGas: gas.toString(), gasLimit: gasLimit.toString() },
+      "Zora sell: gas estimated",
+    );
+  } catch (gasErr) {
+    const msg = gasErr instanceof Error ? gasErr.message.slice(0, 200) : String(gasErr);
+    logger.warn({ ...logCtx, err: msg }, "Zora sell: gas estimation failed — using 500k fallback");
+  }
+
+  // ── ETH balance snapshot → submit → receipt → measure received ───────────
   const ethBalanceBefore = await publicClient.getBalance({ address: account.address });
 
-  const txHash = await executeZoraSwapTx({
-    call,
-    tokenInAddress: tokenAddress, // ERC20 being sold — approval required
-    tokenInAmount: tokenBalance,
-    maxGasGwei,
-    publicClient,
-    walletClient,
+  const txHash = await walletClient.sendTransaction({
+    to: routerAddress,
+    data: callData,
+    value: txValue,
+    gas: gasLimit,
+    maxFeePerGas,
+    maxPriorityFeePerGas,
     account,
-    logCtx,
+    chain: base,
   });
+  logger.info({ ...logCtx, txHash }, "Zora sell: tx submitted");
 
-  // Receipt is already confirmed inside executeZoraSwapTx — fetch without waiting.
-  const receipt = await publicClient.getTransactionReceipt({ hash: txHash });
-  const gasCost = receipt.gasUsed * (receipt.effectiveGasPrice ?? 0n);
+  const receipt = await publicClient.waitForTransactionReceipt({ hash: txHash, timeout: 120_000 });
+  if (receipt.status !== "success") {
+    throw new Error(`Zora sell tx reverted on-chain: ${txHash}`);
+  }
+
+  const gasCost = receipt.gasUsed * (receipt.effectiveGasPrice ?? maxFeePerGas);
   const ethBalanceAfter = await publicClient.getBalance({ address: account.address });
   const ethReceivedWei = ethBalanceAfter > ethBalanceBefore
     ? ethBalanceAfter - ethBalanceBefore + gasCost

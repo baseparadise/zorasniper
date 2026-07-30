@@ -109,8 +109,16 @@ export async function get0xSellQuote(params: {
     signal: AbortSignal.timeout(15_000),
   });
 
+  // Read as text first — 0x sometimes returns plain-text errors (e.g. "Unauthorized")
+  // when the API key is missing or invalid, which would crash res.json().
+  const rawText = await res.text();
   // eslint-disable-next-line @typescript-eslint/no-explicit-any
-  const body = (await res.json()) as any;
+  let body: any;
+  try {
+    body = JSON.parse(rawText);
+  } catch {
+    throw new Error(`0x API returned non-JSON (${res.status}): ${rawText.slice(0, 200)}`);
+  }
 
   if (!res.ok) {
     const msg =
