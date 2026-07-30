@@ -19,10 +19,8 @@ import { cn } from "@/lib/utils";
 const configSchema = z.object({
   buyAmountEth: z.string().min(1, "Required").regex(/^\d*\.?\d+$/, "Must be a valid number"),
   slippagePercent: z.coerce.number().min(0).max(100),
-  maxGasGwei: z.coerce.number().min(0),
   watchMode: z.enum(["whitelist", "all"]),
   enabled: z.boolean(),
-  minLiquidityEth: z.coerce.number().nullable().optional(),
   autoSell: z.boolean().default(false),
   takeProfitPercent: z.coerce.number().nullable().optional(),
   stopLossPercent: z.coerce.number().nullable().optional(),
@@ -70,10 +68,8 @@ export default function Settings() {
     defaultValues: {
       buyAmountEth: "0.01",
       slippagePercent: 10,
-      maxGasGwei: 5,
       watchMode: "whitelist",
       enabled: false,
-      minLiquidityEth: null,
       autoSell: false,
       takeProfitPercent: null,
       stopLossPercent: null,
@@ -86,10 +82,8 @@ export default function Settings() {
       form.reset({
         buyAmountEth: config.buyAmountEth,
         slippagePercent: config.slippagePercent,
-        maxGasGwei: config.maxGasGwei,
         watchMode: config.watchMode as "whitelist" | "all",
         enabled: config.enabled,
-        minLiquidityEth: config.minLiquidityEth,
         autoSell: config.autoSell ?? false,
         takeProfitPercent: config.takeProfitPercent,
         stopLossPercent: config.stopLossPercent,
@@ -210,41 +204,6 @@ export default function Settings() {
                 )}
               />
 
-              <FormField
-                control={form.control}
-                name="maxGasGwei"
-                render={({ field }) => (
-                  <FieldRow label="Max Gas (Gwei)" desc="Absolute ceiling for network fees">
-                    <FormControl>
-                      <Input
-                        {...field}
-                        type="number"
-                        className={inputClass}
-                        onChange={(e) => field.onChange(Number(e.target.value))}
-                      />
-                    </FormControl>
-                  </FieldRow>
-                )}
-              />
-
-              <FormField
-                control={form.control}
-                name="minLiquidityEth"
-                render={({ field }) => (
-                  <FieldRow label="Min Liquidity (ETH)" desc="Skip tokens below this">
-                    <FormControl>
-                      <Input
-                        {...field}
-                        value={field.value ?? ""}
-                        onChange={(e) => field.onChange(e.target.value ? Number(e.target.value) : null)}
-                        type="number"
-                        className={inputClass}
-                        placeholder="Optional"
-                      />
-                    </FormControl>
-                  </FieldRow>
-                )}
-              />
 
               <FormField
                 control={form.control}
