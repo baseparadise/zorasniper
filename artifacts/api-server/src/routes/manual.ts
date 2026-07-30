@@ -1256,13 +1256,30 @@ router.post("/positions/:id/sell", async (req, res): Promise<void> => {
     return;
   }
 
+  // Fix: atomically claim the trade before selling — mirrors the same guard
+  // used by the TP/SL monitor. Without this, a double-tap on "Sell Market"
+  // (or this button racing the TP/SL monitor's own trigger) could start two
+  // concurrent runMarketSell() calls for the same position: one succeeds via
+  // 0x, the other's 0x attempt fails on the now-stale balance and falls back
+  // to Li.Fi, burning an extra approval tx for a sell that never happens.
+  const [claimed] = await db
+    .update(tradesTable)
+    .set({ status: "selling" })
+    .where(and(eq(tradesTable.id, id), eq(tradesTable.status, "confirmed")))
+    .returning();
+
+  if (!claimed) {
+    res.status(409).json({ error: "Sell already in progress for this position" });
+    return;
+  }
+
   // Respond immediately; sell executes in background
-  res.status(202).json(trade);
+  res.status(202).json(claimed);
 
   // Unified sell path: 0x API (primary) → Li.Fi (fallback)
   // Same route for both sniper and manual positions.
-  runMarketSell(trade.id, addr, rawBal).catch((err) =>
-    logger.error({ err, tradeId: trade.id }, "Market sell background error"),
+  runMarketSell(claimed.id, addr, rawBal).catch((err) =>
+    logger.error({ err, tradeId: claimed.id }, "Market sell background error"),
   );
 });
 
