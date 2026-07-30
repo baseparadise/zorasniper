@@ -400,9 +400,13 @@ async function executeZoraSwapTx(params: {
 /**
  * Fetch the current market price of a token in USDC via the Zora /coin endpoint.
  *
- * Uses zora20Token.tokenPrice.priceInUsdc — the market price per token based on
- * the bonding curve / pool state. This is NOT a sell simulation, so it is not
- * affected by sell-side price impact.
+ * Parses the same JSON fields as fetchTokenMarketData in manual.ts so the
+ * TP/SL monitor and the /positions card always read price from the same source:
+ *   data.coin ?? data.zora20Token  (tries "coin" key first, falls back to "zora20Token")
+ *   token.tokenPrice.priceInUsdc  (primary)  OR  token.price  (fallback)
+ *
+ * Previously only read data.zora20Token — if the API returned "coin" the monitor
+ * returned null and TP/SL never triggered while the card still showed a price.
  *
  * Returns null if the token is not yet indexed or the API cannot return a price.
  * Expected for very new tokens (< few blocks old); caller should skip and retry.
@@ -420,7 +424,12 @@ async function fetchTokenPriceUsdc(tokenAddress: string): Promise<number | null>
 
     if (res.ok) {
       const data = await res.json();
-      const priceInUsdc: string | undefined = data?.zora20Token?.tokenPrice?.priceInUsdc;
+      // Try "coin" key first (newer API shape), fall back to "zora20Token" (older shape).
+      // Mirrors the parsing logic in manual.ts fetchTokenMarketData so both paths
+      // read from the same field and can never diverge on the same API response.
+      const token = data?.coin ?? data?.zora20Token;
+      const priceInUsdc: string | undefined =
+        token?.tokenPrice?.priceInUsdc ?? token?.price;
       if (priceInUsdc) {
         const price = parseFloat(priceInUsdc);
         if (price > 0) return price;
