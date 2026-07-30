@@ -752,8 +752,31 @@ async function submitZoraQuoteTx(opts: {
       "Zora sell: gas estimated",
     );
   } catch (e) {
-    const msg = e instanceof Error ? e.message.slice(0, 200) : String(e);
-    logger.warn({ ...logCtx, err: msg }, "Zora sell: gas estimation failed — using 500k fallback");
+    const msg     = e instanceof Error ? e.message : String(e);
+    // Extract the revert data hex from the error if available (viem attaches it)
+    // eslint-disable-next-line @typescript-eslint/no-explicit-any
+    const revertData = (e as any)?.data ?? (e as any)?.cause?.data ?? "";
+
+    // "Execution reverted" means the contract explicitly rejected the call —
+    // no amount of gas will help.  Throwing here avoids burning gas on a
+    // tx that is guaranteed to revert on-chain, and surfaces the real cause.
+    const isExplicitRevert =
+      msg.toLowerCase().includes("revert") ||
+      msg.toLowerCase().includes("nonce") ||
+      msg.toLowerCase().includes("invalid sig");
+
+    if (isExplicitRevert) {
+      throw new Error(
+        `Zora sell: tx will revert — aborting before submission. ` +
+        `reason: ${msg.slice(0, 300)}${revertData ? ` data: ${revertData}` : ""}`,
+      );
+    }
+
+    // Non-revert failures (OOG estimate, network error): use 500k fallback
+    logger.warn(
+      { ...logCtx, err: msg.slice(0, 300) },
+      "Zora sell: gas estimation failed (non-revert) — using 500k fallback",
+    );
   }
 
   // ── Submit and confirm ────────────────────────────────────────────────────
@@ -1233,9 +1256,13 @@ async function executeLiFiSell(params: {
         : fees.maxFeePerGas;
   } catch { /* let viem fall back to its own estimation */ }
 
-  // Pre-flight ETH balance check
+  // Pre-flight ETH balance check.
+  // KyberSwap routes through Zora V4 / Uniswap V4 pools which are multi-hop and
+  // notoriously expensive.  Li.Fi's own estimate is often ~10-30 % too low, so
+  // we pad to 150 % of the quoted gasLimit.
   const lifiTxValue = BigInt(sellTx.value || "0");
-  const lifiGasLimit = sellTx.gasLimit ? BigInt(sellTx.gasLimit) : 800_000n;
+  const lifiGasLimitRaw = sellTx.gasLimit ? BigInt(sellTx.gasLimit) : 800_000n;
+  const lifiGasLimit = (lifiGasLimitRaw * 150n) / 100n;
   if (maxFeePerGas) {
     const lifiEstimatedCost = lifiGasLimit * maxFeePerGas + lifiTxValue;
     const lifiEthBalance = await publicClient.getBalance({ address: account.address });
@@ -1251,7 +1278,7 @@ async function executeLiFiSell(params: {
     to:                sellTx.to as Address,
     data:              sellTx.data as `0x${string}`,
     value:             lifiTxValue,
-    gas:               sellTx.gasLimit ? BigInt(sellTx.gasLimit) : undefined,
+    gas:               lifiGasLimit,
     maxFeePerGas,
     maxPriorityFeePerGas,
     account,
