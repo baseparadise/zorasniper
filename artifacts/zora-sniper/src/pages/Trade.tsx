@@ -294,11 +294,21 @@ function PositionCard({ position, onRefresh }: { position: any; onRefresh: () =>
             <p className="text-white font-mono text-xs font-semibold">
               {liveValueUsd !== null ? formatUsd(liveValueUsd) : "—"}
             </p>
-            {!livePnlZero && (
-              <span className={cn("text-[10px] font-mono font-semibold leading-none", livePnlPositive ? "text-green-400" : "text-red-400")}>
+            {/* Always show PnL% — neutral when 0, grey dash when entry USD unknown */}
+            {trade.entryValueUsdc && parseFloat(trade.entryValueUsdc) > 0 ? (
+              <span className={cn(
+                "text-[10px] font-mono font-semibold leading-none",
+                livePnlPositive ? "text-green-400"
+                  : livePnlZero   ? "text-white/35"
+                  : "text-red-400"
+              )}>
                 ({livePnlPositive ? "+" : ""}{livePnlPct.toFixed(1)}%)
               </span>
-            )}
+            ) : liveValueUsd !== null ? (
+              <span className="text-[10px] font-mono text-white/25" title="Entry USD not recorded — PnL unavailable">
+                —%
+              </span>
+            ) : null}
           </div>
         </div>
       </div>
