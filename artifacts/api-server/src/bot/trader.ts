@@ -475,6 +475,115 @@ async function fetchPositionValueUsdc(
  * Primary:  0x API v2 Permit2 (token → ETH via best available DEX route).
  * Fallback: Li.Fi (token → ETH) if 0x API cannot find a route or fails.
  */
+/**
+ * Fetch a SELL quote from Zora Quote API (erc20 → ETH).
+ * Mirrors fetchZoraQuote but with tokenIn/tokenOut reversed.
+ * Zora tokens are best sold via their own API since 0x / Li.Fi often lack
+ * routing for the Zora bonding curve pool.
+ */
+async function fetchZoraSellQuote(params: {
+  tokenAddress: string;
+  sellAmountWei: bigint;
+  slippage: number; // fractional, e.g. 0.05 for 5%
+  sender: string;
+}): Promise<ZoraCall> {
+  const headers: Record<string, string> = { "Content-Type": "application/json" };
+  const _apiKey = nextZoraKey();
+  if (_apiKey) headers["x-api-key"] = _apiKey;
+
+  const body = JSON.stringify({
+    chainId: base.id,
+    tokenIn: { type: "erc20", address: params.tokenAddress.toLowerCase() },
+    tokenOut: { type: "eth" },
+    amountIn: params.sellAmountWei.toString(),
+    slippage: params.slippage,
+    sender: params.sender.toLowerCase(),
+    recipient: params.sender.toLowerCase(),
+  });
+
+  const res = await fetch(`${ZORA_QUOTE_API}/quote`, {
+    method: "POST",
+    headers,
+    body,
+    signal: AbortSignal.timeout(15_000),
+  });
+
+  if (!res.ok) {
+    const text = await res.text().catch(() => "");
+    throw new Error(`Zora sell quote HTTP ${res.status}: ${text.slice(0, 200)}`);
+  }
+
+  const data = await res.json();
+  if (!data.call) {
+    throw new Error(`Zora sell quote returned no call: ${JSON.stringify(data).slice(0, 200)}`);
+  }
+
+  logger.info({ target: data.call.target }, "Zora sell quote OK");
+  return data.call as ZoraCall;
+}
+
+/**
+ * Execute a sell via Zora Quote API (erc20 → ETH).
+ * Primary sell path for Zora tokens — uses the same API used for buying.
+ * Throws on failure so the caller can fall back to 0x / Li.Fi.
+ */
+async function executeZoraApiSell(params: {
+  tradeId: number;
+  tokenAddress: Address;
+  tokenBalance: bigint;
+  slippagePercent: number;
+  maxGasGwei: number;
+  reason: string;
+}): Promise<void> {
+  const { tradeId, tokenAddress, tokenBalance, slippagePercent, maxGasGwei, reason } = params;
+  const logCtx = { tradeId, reason, method: "zora" };
+  logger.info(logCtx, "executeZoraApiSell: fetching Zora sell quote (erc20 → ETH)");
+
+  const account = privateKeyToAccount(getWalletKey());
+  const httpUrl = getHttpRpcUrl();
+  const publicClient = createPublicClient({ chain: base, transport: http(httpUrl) });
+  const walletClient = createWalletClient({ account, chain: base, transport: http(httpUrl) });
+
+  const call = await fetchZoraSellQuote({
+    tokenAddress,
+    sellAmountWei: tokenBalance,
+    slippage: slippagePercent / 100,
+    sender: account.address,
+  });
+
+  // Record ETH balance before so we can measure how much ETH was received.
+  const ethBalanceBefore = await publicClient.getBalance({ address: account.address });
+
+  const txHash = await executeZoraSwapTx({
+    call,
+    tokenInAddress: tokenAddress, // ERC20 being sold — approval required
+    tokenInAmount: tokenBalance,
+    maxGasGwei,
+    publicClient,
+    walletClient,
+    account,
+    logCtx,
+  });
+
+  // Receipt is already confirmed inside executeZoraSwapTx — fetch without waiting.
+  const receipt = await publicClient.getTransactionReceipt({ hash: txHash });
+  const gasCost = receipt.gasUsed * (receipt.effectiveGasPrice ?? 0n);
+  const ethBalanceAfter = await publicClient.getBalance({ address: account.address });
+  const ethReceivedWei = ethBalanceAfter > ethBalanceBefore
+    ? ethBalanceAfter - ethBalanceBefore + gasCost
+    : 0n;
+  const ethReceived = formatEther(ethReceivedWei);
+
+  const [updated] = await db
+    .update(tradesTable)
+    .set({ status: "sold", sellTxHash: txHash, sellAmountEth: ethReceived, pnlEth: ethReceived })
+    .where(eq(tradesTable.id, tradeId))
+    .returning();
+
+  broadcast("trade", updated);
+  logger.info({ tradeId, ethReceived, reason }, "Sell confirmed via Zora API (erc20 → ETH)");
+}
+
 export async function executeZoraSell(params: {
   tradeId: number;
   tokenAddress: Address;
@@ -483,6 +592,16 @@ export async function executeZoraSell(params: {
   maxGasGwei: number;
   reason: string;
 }): Promise<void> {
+  // 1. Zora Quote API — primary path for Zora tokens (same API used for buying)
+  try {
+    await executeZoraApiSell(params);
+    return;
+  } catch (zoraErr) {
+    const msg = zoraErr instanceof Error ? zoraErr.message : String(zoraErr);
+    logger.warn({ tradeId: params.tradeId, err: msg }, "Zora API sell failed — falling back to 0x");
+  }
+
+  // 2. 0x API — secondary path (Permit2, works for standard ERC-20s on Uniswap)
   try {
     await execute0xSellTrade(params);
     return;
@@ -490,6 +609,8 @@ export async function executeZoraSell(params: {
     const msg = zeroxErr instanceof Error ? zeroxErr.message : String(zeroxErr);
     logger.warn({ tradeId: params.tradeId, err: msg }, "0x API sell failed — falling back to Li.Fi");
   }
+
+  // 3. Li.Fi — last resort aggregator
   await executeLiFiSell(params);
 }
 

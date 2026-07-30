@@ -21,7 +21,12 @@ import basescanLogo from "@/assets/basescan-logo.png";
 
 function formatUsd(val: number): string {
   if (val === 0) return "—";
-  if (val < 0.000001) return `$${val.toExponential(3)}`;
+  if (val < 0.000001) {
+    // Show enough decimal places to display 3 significant figures.
+    // e.g. 1.5e-7 → $0.000000150  (not scientific notation)
+    const decimals = Math.min(Math.max(6, Math.ceil(-Math.log10(val)) + 2), 12);
+    return `$${val.toFixed(decimals)}`;
+  }
   if (val < 0.01) return `$${val.toFixed(6)}`;
   if (val < 1) return `$${val.toFixed(4)}`;
   if (val >= 1_000_000) return `$${(val / 1_000_000).toFixed(2)}M`;
@@ -267,12 +272,21 @@ function PositionCard({ position, onRefresh }: { position: any; onRefresh: () =>
       <div className="grid grid-cols-2 gap-2">
         <div className="rounded-xl bg-white/5 p-2.5">
           <p className="text-white/30 text-[10px] uppercase tracking-wider mb-1">Entry</p>
-          <p className="text-white font-mono text-xs font-semibold">
-            {trade.entryValueUsdc && parseFloat(trade.entryValueUsdc) > 0
-              ? formatUsd(parseFloat(trade.entryValueUsdc))
-              : '—'}
-          </p>
-          <p className="text-white/30 text-[10px] font-mono mt-0.5">{formatEth(trade.buyAmountEth)} ETH</p>
+          {trade.entryValueUsdc && parseFloat(trade.entryValueUsdc) > 0 ? (
+            <>
+              <p className="text-white font-mono text-xs font-semibold">
+                {formatUsd(parseFloat(trade.entryValueUsdc))}
+              </p>
+              <p className="text-white/30 text-[10px] font-mono mt-0.5">{formatEth(trade.buyAmountEth)} ETH</p>
+            </>
+          ) : (
+            <>
+              <p className="text-white font-mono text-xs font-semibold">
+                {formatEth(trade.buyAmountEth)} ETH
+              </p>
+              <p className="text-white/30 text-[10px] font-mono mt-0.5">USD not measured</p>
+            </>
+          )}
         </div>
         <div className="rounded-xl bg-white/5 p-2.5">
           <p className="text-white/30 text-[10px] uppercase tracking-wider mb-1">Est. Value</p>

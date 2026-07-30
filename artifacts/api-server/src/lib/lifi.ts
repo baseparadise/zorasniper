@@ -99,7 +99,7 @@ export async function getLiFiQuote(
       Accept: "application/json",
       ...(process.env.LIFI_API_KEY ? { "x-lifi-api-key": process.env.LIFI_API_KEY } : {}),
     },
-    signal: AbortSignal.timeout(15_000),
+    signal: AbortSignal.timeout(30_000),
   });
 
   const body = (await res.json()) as { message?: string; code?: number } & LiFiQuoteResponse;
