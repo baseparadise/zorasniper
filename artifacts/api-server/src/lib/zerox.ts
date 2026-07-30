@@ -145,3 +145,77 @@ export async function get0xSellQuote(params: {
 
   return body as ZeroXQuoteResponse;
 }
+
+/**
+ * Fetch a swap quote from 0x API v2 **AllowanceHolder** endpoint.
+ *
+ * Uses a traditional ERC-20 approve(spender, amount) flow — no Permit2
+ * EIP-712 signing required.  This is more universally compatible, and is
+ * what wallets like Zerion use by default.  Prefer this over the Permit2
+ * endpoint for tokens built on Zora / Uniswap V4.
+ *
+ * Endpoint: /swap/allowance-holder/quote
+ */
+export async function get0xAllowanceHolderQuote(params: {
+  sellToken: string;
+  buyToken: string;
+  sellAmount: bigint;
+  taker: string;
+  slippageBps?: number;
+}): Promise<ZeroXQuoteResponse> {
+  const { sellToken, buyToken, sellAmount, taker, slippageBps = 100 } = params;
+
+  const apiKey = get0xApiKey();
+  const headers: Record<string, string> = {
+    "Content-Type": "application/json",
+    "0x-version": "v2",
+    "0x-chain-id": String(BASE_CHAIN_ID),
+  };
+  if (apiKey) headers["0x-api-key"] = apiKey;
+
+  const qs = new URLSearchParams({
+    chainId: String(BASE_CHAIN_ID),
+    sellToken,
+    buyToken,
+    sellAmount: sellAmount.toString(),
+    taker,
+    slippageBps: String(slippageBps),
+  });
+
+  const url = `${ZEROX_API_BASE}/swap/allowance-holder/quote?${qs}`;
+
+  logger.info(
+    { sellToken, buyToken, sellAmount: sellAmount.toString(), slippageBps },
+    "Fetching 0x AllowanceHolder quote",
+  );
+
+  const res = await fetch(url, { headers, signal: AbortSignal.timeout(15_000) });
+  const rawText = await res.text();
+  // eslint-disable-next-line @typescript-eslint/no-explicit-any
+  let body: any;
+  try {
+    body = JSON.parse(rawText);
+  } catch {
+    throw new Error(`0x AllowanceHolder API non-JSON (${res.status}): ${rawText.slice(0, 200)}`);
+  }
+
+  if (!res.ok) {
+    const msg =
+      body?.reason ??
+      body?.validationErrors?.[0]?.description ??
+      JSON.stringify(body).slice(0, 300);
+    throw new Error(`0x AllowanceHolder quote failed (${res.status}): ${msg}`);
+  }
+
+  if (!body.transaction) {
+    throw new Error(
+      `0x AllowanceHolder quote: no transaction: ${JSON.stringify(body).slice(0, 300)}`,
+    );
+  }
+
+  if (body.liquidityAvailable === false) {
+    throw new Error("0x AllowanceHolder: no liquidity available for this swap");
+  }
+
+  return body as ZeroXQuoteResponse;
+}

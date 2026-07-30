@@ -9,7 +9,7 @@ import {
   type Address,
 } from "viem";
 import { getLiFiQuote, ensureApproval, ETH_ADDRESS } from "../lib/lifi";
-import { get0xSellQuote, ZEROX_NATIVE_ETH } from "../lib/zerox";
+import { get0xSellQuote, get0xAllowanceHolderQuote, ZEROX_NATIVE_ETH } from "../lib/zerox";
 import { base } from "viem/chains";
 import { privateKeyToAccount } from "viem/accounts";
 import { db, tradesTable, creatorsTable } from "@workspace/db";
@@ -1005,10 +1005,142 @@ export async function executeZoraSell(params: {
 }
 
 /**
- * Execute a sell via 0x API v2 (Permit2).
- * Handles ERC-20 approval (Permit2 or AllowanceHolder path), EIP-712
- * signature injection, gas estimation, tx submission, receipt, and
- * DB update. Throws on any failure so the caller can fall back to Li.Fi.
+ * Execute a sell via 0x API v2 **AllowanceHolder** endpoint.
+ *
+ * Simpler than the Permit2 path: just approve the spender with a standard
+ * ERC-20 approve() and submit the transaction as-is — no EIP-712 signing.
+ * This is what wallets like Zerion use and is more compatible with Zora /
+ * Uniswap V4 tokens that cause the Permit2 path to fail gas estimation.
+ *
+ * Throws on any failure so the caller can fall back to the Permit2 path.
+ */
+async function execute0xAllowanceHolderSell(params: {
+  tradeId: number;
+  tokenAddress: Address;
+  tokenBalance: bigint;
+  slippagePercent: number;
+  maxGasGwei: number;
+  reason: string;
+}): Promise<void> {
+  const { tradeId, tokenAddress, tokenBalance, slippagePercent, reason } = params;
+  const slippageBps = Math.round(slippagePercent * 100);
+
+  const account = privateKeyToAccount(getWalletKey());
+  const httpUrl = getHttpRpcUrl();
+  const publicClient = createPublicClient({ chain: base, transport: http(httpUrl) });
+  const walletClient = createWalletClient({ account, chain: base, transport: http(httpUrl) });
+
+  const logCtx = { tradeId, reason, method: "0x-ah" };
+  logger.info(logCtx, "execute0xAllowanceHolderSell: fetching quote");
+
+  const quote = await get0xAllowanceHolderQuote({
+    sellToken: tokenAddress,
+    buyToken: ZEROX_NATIVE_ETH,
+    sellAmount: tokenBalance,
+    taker: account.address,
+    slippageBps,
+  });
+
+  const tx = quote.transaction;
+  const txData = tx.data as `0x${string}`;
+  const txValue = BigInt(tx.value ?? "0");
+
+  // Approve the AllowanceHolder spender if needed — standard ERC-20 approve, no Permit2
+  const spenderAddress = (quote.issues?.allowance?.spender ?? tx.to) as Address;
+  if (spenderAddress) {
+    const allowance = await publicClient.readContract({
+      address: tokenAddress,
+      abi: ERC20_ABI,
+      functionName: "allowance",
+      args: [account.address, spenderAddress],
+    });
+    if (allowance < tokenBalance) {
+      logger.info({ ...logCtx, spender: spenderAddress }, "0x AH sell: approving spender");
+      const approveTx = await walletClient.writeContract({
+        address: tokenAddress,
+        abi: ERC20_ABI,
+        functionName: "approve",
+        args: [spenderAddress, maxUint256],
+        chain: base,
+        account,
+      });
+      await publicClient.waitForTransactionReceipt({ hash: approveTx, timeout: 60_000 });
+      logger.info({ ...logCtx, approveTx }, "0x AH sell: approval confirmed");
+    } else {
+      logger.info({ ...logCtx, spender: spenderAddress }, "0x AH sell: allowance sufficient");
+    }
+  }
+
+  // Gas estimation
+  const fees = await publicClient.estimateFeesPerGas();
+  let estimatedGas: bigint;
+  try {
+    estimatedGas = await publicClient.estimateGas({
+      to: tx.to as Address,
+      data: txData,
+      value: txValue,
+      account: account.address,
+    });
+  } catch (gasErr) {
+    const msg = gasErr instanceof Error ? gasErr.message : String(gasErr);
+    throw new Error(`0x AllowanceHolder gas estimation failed: ${msg.slice(0, 300)}`);
+  }
+
+  const gasLimit = (estimatedGas * 120n) / 100n;
+  const maxFeePerGas = fees.maxFeePerGas;
+  const maxPriorityFeePerGas =
+    fees.maxPriorityFeePerGas < maxFeePerGas ? fees.maxPriorityFeePerGas : maxFeePerGas;
+
+  logger.info(
+    { ...logCtx, estimatedGas: estimatedGas.toString(), gasLimit: gasLimit.toString() },
+    "0x AH sell: gas estimated — submitting",
+  );
+
+  const ethBalanceBefore = await publicClient.getBalance({ address: account.address });
+
+  const txHash = await walletClient.sendTransaction({
+    to: tx.to as Address,
+    data: txData,
+    value: txValue,
+    gas: gasLimit,
+    maxFeePerGas,
+    maxPriorityFeePerGas,
+    account,
+    chain: base,
+  });
+
+  logger.info({ ...logCtx, txHash }, "0x AH sell tx submitted");
+
+  const receipt = await publicClient.waitForTransactionReceipt({ hash: txHash, timeout: 120_000 });
+  if (receipt.status !== "success") {
+    throw new Error(`0x AllowanceHolder sell tx reverted on-chain: ${txHash}`);
+  }
+
+  const gasCostActual = receipt.gasUsed * (receipt.effectiveGasPrice ?? maxFeePerGas);
+  const ethBalanceAfter = await publicClient.getBalance({ address: account.address });
+  const ethReceivedWei = ethBalanceAfter > ethBalanceBefore
+    ? ethBalanceAfter - ethBalanceBefore + gasCostActual
+    : (quote.minBuyAmount ? BigInt(quote.minBuyAmount) : 0n);
+  const ethReceived = formatEther(ethReceivedWei);
+
+  const [updated] = await db
+    .update(tradesTable)
+    .set({ status: "sold", sellTxHash: txHash, sellAmountEth: ethReceived, pnlEth: ethReceived })
+    .where(eq(tradesTable.id, tradeId))
+    .returning();
+
+  broadcast("trade", updated);
+  logger.info({ tradeId, ethReceived, txHash, reason }, "Sell confirmed via 0x AllowanceHolder");
+}
+
+/**
+ * Execute a sell via 0x API v2.
+ *
+ * Tries the AllowanceHolder path first (simpler, no EIP-712, what Zerion uses —
+ * works for Zora / Uniswap V4 tokens that the Permit2 path cannot handle).
+ * Falls back to the Permit2 path on failure.
+ *
+ * Throws on any failure so the caller can fall back to Li.Fi.
  */
 async function execute0xSellTrade(params: {
   tradeId: number;
@@ -1018,6 +1150,19 @@ async function execute0xSellTrade(params: {
   maxGasGwei: number;
   reason: string;
 }): Promise<void> {
+  // ── AllowanceHolder path — try first (Zerion uses this; works for Zora V4 tokens) ──
+  try {
+    await execute0xAllowanceHolderSell(params);
+    return;
+  } catch (ahErr) {
+    const ahMsg = ahErr instanceof Error ? ahErr.message : String(ahErr);
+    logger.warn(
+      { tradeId: params.tradeId, err: ahMsg },
+      "0x AllowanceHolder failed — trying Permit2 path",
+    );
+  }
+
+  // ── Permit2 path — fallback ───────────────────────────────────────────────
   const { tradeId, tokenAddress, tokenBalance, slippagePercent, reason } = params;
   const slippageBps = Math.round(slippagePercent * 100); // e.g. 5% → 500 bps
 
@@ -1026,8 +1171,8 @@ async function execute0xSellTrade(params: {
   const publicClient = createPublicClient({ chain: base, transport: http(httpUrl) });
   const walletClient = createWalletClient({ account, chain: base, transport: http(httpUrl) });
 
-  const logCtx = { tradeId, reason, method: "0x" };
-  logger.info(logCtx, "execute0xSellTrade: fetching 0x quote");
+  const logCtx = { tradeId, reason, method: "0x-p2" };
+  logger.info(logCtx, "execute0xSellTrade (Permit2): fetching 0x quote");
 
   // ── Get 0x quote (token → ETH) ───────────────────────────────────────────
   const quote = await get0xSellQuote({
