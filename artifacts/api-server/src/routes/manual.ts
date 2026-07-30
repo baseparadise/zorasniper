@@ -804,50 +804,29 @@ router.post("/trades/manual-buy", async (req, res): Promise<void> => {
   const addr = tokenAddress as Address;
   const publicClient = makePublicClient();
 
-  // Read token name/symbol
-  let tokenName = "Unknown";
-  let tokenSymbol = "???";
-  try {
-    const [n, s] = await Promise.all([
-      publicClient.readContract({ address: addr, abi: ERC20_ABI, functionName: "name" }),
-      publicClient.readContract({ address: addr, abi: ERC20_ABI, functionName: "symbol" }),
-    ]);
-    tokenName = n as string;
-    tokenSymbol = s as string;
-  } catch {
-    /* proceed with defaults */
-  }
-
-  // ── Entry price probe: Zora first, Li.Fi fallback ────────────────────────
-  let entryPriceEth = 0;
-  try {
-    let probeAccount: Address;
-    try { probeAccount = privateKeyToAccount(getWalletKey()).address; } catch { probeAccount = ZERO_ADDRESS; }
-
-    // Sell-direction Zora probe (same as TP/SL monitor). Pre-buy so no balance held yet — probe 1 token.
-    const zoraPrice = await fetchZoraPriceProbe(addr, probeAccount, parseUnits("1", 18));
-    if (zoraPrice !== null) {
-      entryPriceEth = zoraPrice;
-    }
-  } catch {
-    /* price probe failed — entry price stays 0 */
-  }
-
+  // Speed fix: name/symbol reads + the entry price probe used to run here,
+  // synchronously, before the trade row was even inserted — every manual
+  // buy click waited on 3 extra network calls before the UI saw anything.
+  // Neither is on the buy's critical path (both are cosmetic — display name
+  // and a pre-buy price estimate), so insert immediately with placeholders
+  // and backfill them in the background alongside the actual buy.
   const [tradeRow] = await db
     .insert(tradesTable)
     .values({
       tokenAddress,
-      tokenName,
-      tokenSymbol,
+      tokenName: "Unknown",
+      tokenSymbol: "???",
       creatorAddress: ZERO_ADDRESS,
       buyAmountEth,
       status: "pending",
       source: "manual",
       takeProfitPercent: takeProfitPercent?.toString() ?? null,
       stopLossPercent: stopLossPercent?.toString() ?? null,
-      entryPriceEth: entryPriceEth > 0 ? entryPriceEth.toFixed(18) : null,
+      entryPriceEth: null,
     })
     .returning();
+
+  res.status(201).json(tradeRow);
 
   runBuy(tradeRow.id, addr, buyAmountEth, slippagePercent).then(async () => {
     if (takeProfitPercent || stopLossPercent) {
@@ -881,7 +860,37 @@ router.post("/trades/manual-buy", async (req, res): Promise<void> => {
     }
   });
 
-  res.status(201).json(tradeRow);
+  // Backfill display name/symbol + pre-buy price estimate in the background
+  // — cosmetic fields, no reason to hold up the response for them.
+  (async () => {
+    let tokenName = "Unknown";
+    let tokenSymbol = "???";
+    try {
+      const [n, s] = await Promise.all([
+        publicClient.readContract({ address: addr, abi: ERC20_ABI, functionName: "name" }),
+        publicClient.readContract({ address: addr, abi: ERC20_ABI, functionName: "symbol" }),
+      ]);
+      tokenName = n as string;
+      tokenSymbol = s as string;
+    } catch {
+      /* proceed with defaults */
+    }
+
+    let entryPriceEth = 0;
+    try {
+      let probeAccount: Address;
+      try { probeAccount = privateKeyToAccount(getWalletKey()).address; } catch { probeAccount = ZERO_ADDRESS; }
+      const zoraPrice = await fetchZoraPriceProbe(addr, probeAccount, parseUnits("1", 18));
+      if (zoraPrice !== null) entryPriceEth = zoraPrice;
+    } catch {
+      /* price probe failed — entry price stays null */
+    }
+
+    await db
+      .update(tradesTable)
+      .set({ tokenName, tokenSymbol, entryPriceEth: entryPriceEth > 0 ? entryPriceEth.toFixed(18) : null })
+      .where(eq(tradesTable.id, tradeRow.id));
+  })().catch((err) => logger.error({ err, tradeId: tradeRow.id }, "Manual buy metadata backfill failed"));
 });
 
 // ── Simulate (dry-run: Zora quote first, Li.Fi fallback) ────────────────────
@@ -1220,48 +1229,13 @@ router.post("/positions/:id/sell", async (req, res): Promise<void> => {
   const id = parseInt(req.params.id, 10);
   if (isNaN(id)) { res.status(400).json({ error: "Invalid id" }); return; }
 
-  const [trade] = await db
-    .select()
-    .from(tradesTable)
-    .where(and(eq(tradesTable.id, id), eq(tradesTable.status, "confirmed")));
-
-  if (!trade) { res.status(404).json({ error: "Position not found or already closed" }); return; }
-
-  const addr = trade.tokenAddress as Address;
-  const publicClient = makePublicClient();
-
-  let walletAddress: Address;
-  try {
-    walletAddress = privateKeyToAccount(getWalletKey()).address;
-  } catch {
-    res.status(500).json({ error: "Wallet not configured" });
-    return;
-  }
-
-  let rawBal: bigint;
-  try {
-    rawBal = await publicClient.readContract({
-      address: addr,
-      abi: ERC20_ABI,
-      functionName: "balanceOf",
-      args: [walletAddress],
-    });
-  } catch {
-    res.status(500).json({ error: "Failed to read token balance" });
-    return;
-  }
-
-  if (rawBal === 0n) {
-    res.status(400).json({ error: "No token balance to sell" });
-    return;
-  }
-
-  // Fix: atomically claim the trade before selling — mirrors the same guard
-  // used by the TP/SL monitor. Without this, a double-tap on "Sell Market"
-  // (or this button racing the TP/SL monitor's own trigger) could start two
-  // concurrent runMarketSell() calls for the same position: one succeeds via
-  // 0x, the other's 0x attempt fails on the now-stale balance and falls back
-  // to Li.Fi, burning an extra approval tx for a sell that never happens.
+  // Speed fix: claim the trade FIRST (single atomic UPDATE) and respond
+  // immediately — the wallet-address derivation and on-chain balanceOf read
+  // used to run synchronously before the client got any acknowledgement.
+  // Both still happen, just after the response, right before the actual
+  // sell. The atomic claim (confirmed -> selling) is unchanged: it's what
+  // prevents a double-tap or a race with the TP/SL monitor from starting
+  // two concurrent sells for the same position.
   const [claimed] = await db
     .update(tradesTable)
     .set({ status: "selling" })
@@ -1269,18 +1243,44 @@ router.post("/positions/:id/sell", async (req, res): Promise<void> => {
     .returning();
 
   if (!claimed) {
-    res.status(409).json({ error: "Sell already in progress for this position" });
+    res.status(409).json({ error: "Position not found, already closed, or sell already in progress" });
     return;
   }
 
-  // Respond immediately; sell executes in background
   res.status(202).json(claimed);
 
-  // Unified sell path: 0x API (primary) → Li.Fi (fallback)
-  // Same route for both sniper and manual positions.
-  runMarketSell(claimed.id, addr, rawBal).catch((err) =>
-    logger.error({ err, tradeId: claimed.id }, "Market sell background error"),
-  );
+  const addr = claimed.tokenAddress as Address;
+  const publicClient = makePublicClient();
+
+  try {
+    let walletAddress: Address;
+    try {
+      walletAddress = privateKeyToAccount(getWalletKey()).address;
+    } catch {
+      throw new Error("Wallet not configured");
+    }
+
+    const rawBal = await publicClient.readContract({
+      address: addr,
+      abi: ERC20_ABI,
+      functionName: "balanceOf",
+      args: [walletAddress],
+    });
+
+    if (rawBal === 0n) throw new Error("No token balance to sell");
+
+    // Unified sell path: 0x API (primary) → Li.Fi (fallback)
+    // Same route for both sniper and manual positions.
+    await runMarketSell(claimed.id, addr, rawBal);
+  } catch (err) {
+    const failReason = (err instanceof Error ? err.message : String(err)).slice(0, 500);
+    logger.error({ err, tradeId: claimed.id, failReason }, "Market sell background error");
+    // Release the claim so the position isn't stuck in "selling" forever.
+    await db
+      .update(tradesTable)
+      .set({ status: "confirmed", failReason })
+      .where(and(eq(tradesTable.id, claimed.id), eq(tradesTable.status, "selling")));
+  }
 });
 
 // ── Update TP/SL ───────────────────────────────────────────────────────────

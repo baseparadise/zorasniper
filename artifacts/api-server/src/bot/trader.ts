@@ -570,16 +570,20 @@ async function execute0xAllowanceHolderSell(params: {
     }
   }
 
-  // Gas estimation
-  const fees = await publicClient.estimateFeesPerGas();
+  // Gas estimation — run fee + gas estimates concurrently (was sequential),
+  // same pattern already used on the buy path. Saves one RPC round trip.
+  let fees: Awaited<ReturnType<typeof publicClient.estimateFeesPerGas>>;
   let estimatedGas: bigint;
   try {
-    estimatedGas = await publicClient.estimateGas({
-      to: tx.to as Address,
-      data: txData,
-      value: txValue,
-      account: account.address,
-    });
+    [fees, estimatedGas] = await Promise.all([
+      publicClient.estimateFeesPerGas(),
+      publicClient.estimateGas({
+        to: tx.to as Address,
+        data: txData,
+        value: txValue,
+        account: account.address,
+      }),
+    ]);
   } catch (gasErr) {
     const msg = gasErr instanceof Error ? gasErr.message : String(gasErr);
     throw new Error(`0x AllowanceHolder gas estimation failed: ${msg.slice(0, 300)}`);
@@ -899,6 +903,7 @@ export async function executeBuy(params: TradeParams): Promise<void> {
     // latest >= receipt.blockNumber. Specifying receipt.blockNumber caused
     // "Requested resource not found" on Alchemy nodes (block not cached yet).
     let tokenAmount = "";
+    let receivedWei = 0n;
     try {
       const balAfter = await publicClient.readContract({
         address: tokenAddress,
@@ -906,10 +911,10 @@ export async function executeBuy(params: TradeParams): Promise<void> {
         functionName: "balanceOf",
         args: [account.address],
       });
-      const received = balAfter > balBeforeBuy ? balAfter - balBeforeBuy : 0n;
-      if (received > 0n) {
-        tokenAmount = formatUnits(received, 18);
-        logger.info({ received: received.toString(), tokenAddress }, "Token amount measured via balanceOf diff");
+      receivedWei = balAfter > balBeforeBuy ? balAfter - balBeforeBuy : 0n;
+      if (receivedWei > 0n) {
+        tokenAmount = formatUnits(receivedWei, 18);
+        logger.info({ received: receivedWei.toString(), tokenAddress }, "Token amount measured via balanceOf diff");
       } else {
         logger.warn({ balBeforeBuy: balBeforeBuy.toString(), balAfter: balAfter.toString(), tokenAddress }, "balanceOf diff: no increase detected");
       }
@@ -923,17 +928,9 @@ export async function executeBuy(params: TradeParams): Promise<void> {
     // selling the full balance in a thin Zora pool crashes the simulated price,
     // making the entry value appear far lower than the real market value and
     // causing TP/SL thresholds to be miscalibrated.
+    // Speed fix: reuse receivedWei from Step 6 instead of re-reading
+    // balanceOf a second time — same value, one fewer RPC round trip.
     let entryValueUsdc: string | null = null;
-    let receivedWei = 0n;
-    try {
-      const balAfterFinal = await publicClient.readContract({
-        address: tokenAddress,
-        abi: ERC20_ABI,
-        functionName: "balanceOf",
-        args: [account.address],
-      });
-      receivedWei = balAfterFinal > balBeforeBuy ? balAfterFinal - balBeforeBuy : 0n;
-    } catch { /* non-fatal */ }
 
     if (receivedWei > 0n) {
       try {
