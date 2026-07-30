@@ -486,7 +486,9 @@ async function executeViaZora(
 
   // ── Measure tokens received via balanceOf diff ─────────────────────────
   // balBeforeBuy was snapshotted before the tx was sent (see Step 0).
-  // We read balAfter at the confirmed block — reliable on any node (no archive needed).
+  // Read at "latest" — after waitForTransactionReceipt the tx is confirmed so
+  // latest >= receipt.blockNumber. Specifying receipt.blockNumber caused
+  // "Requested resource not found" on Alchemy nodes (block not cached yet).
   let tokenAmount = "";
   try {
     const balAfter = await publicClient.readContract({
@@ -494,7 +496,6 @@ async function executeViaZora(
       abi: ERC20_ABI,
       functionName: "balanceOf",
       args: [account.address],
-      blockNumber: receipt.blockNumber,
     });
     const received = balAfter > balBeforeBuy ? balAfter - balBeforeBuy : 0n;
     if (received > 0n) {
