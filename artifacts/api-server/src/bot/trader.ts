@@ -973,8 +973,8 @@ export async function executeBuy(params: TradeParams): Promise<void> {
         lastEventAt: new Date().toISOString(),
       });
 
-      // ── Start sniper TP/SL monitor (Zora API) — only for sniper trades.
-      // Manual trades have their own Li.Fi-based monitor in routes/manual.ts.
+      // ── Start TP/SL monitor — shared by sniper and manual trades.
+      // Price: Zora /coin API (market price). Sell: 0x AH → Li.Fi.
       if ((takeProfitPercent || stopLossPercent) && entryValueUsdc) {
         monitorTpSlSniper(
           tradeRow.id,
@@ -989,7 +989,7 @@ export async function executeBuy(params: TradeParams): Promise<void> {
         );
         logger.info(
           { tradeId: tradeRow.id, takeProfitPercent, stopLossPercent, entryValueUsdc },
-          "Sniper TP/SL monitor started (Zora API)",
+          "TP/SL monitor started (5 s poll, 0x AH → Li.Fi sell)",
         );
       }
     } else {
@@ -1035,17 +1035,16 @@ export function getWalletAddress(): string | null {
   }
 }
 
-// ── Sniper TP/SL monitor (Zora API) ──────────────────────────────────────
+// ── TP/SL monitor (shared by sniper + manual) ────────────────────────────
 //
-// Separate from the manual trade Li.Fi monitor in routes/manual.ts.
-// New Zora coins are not yet indexed by Li.Fi, so price detection via Li.Fi
-// would always return null. This monitor uses the Zora Quote API for both
-// price probing and the actual sell execution.
+// Price is polled every 5 s via the Zora /coin API (market price × balance).
+// Sell uses the same path as manual sells: 0x AllowanceHolder → Li.Fi.
+// The Zora Quote API is NOT used for sell — it fails for Zora V4 tokens.
 
 /**
- * Background TP/SL monitor for a sniper-bought position.
- * Polls current price via Zora API every 15 seconds.
- * Executes sell (also via Zora API) when TP or SL is hit.
+ * Background TP/SL monitor for a position (sniper or manual).
+ * Polls current price via Zora /coin API every 5 seconds.
+ * Executes sell via 0x AllowanceHolder → Li.Fi when TP or SL is hit.
  * Retries sell up to 3 times on failure before giving up.
  */
 export async function monitorTpSlSniper(
@@ -1067,7 +1066,7 @@ export async function monitorTpSlSniper(
   const account = privateKeyToAccount(getWalletKey());
   const publicClient = createPublicClient({ chain: base, transport: http(getHttpRpcUrl()) });
 
-  const POLL_INTERVAL_MS = 15_000;
+  const POLL_INTERVAL_MS = 5_000;
   const MAX_SELL_ATTEMPTS = 3;
   let sellAttempts = 0;
   let active = true;
@@ -1162,7 +1161,7 @@ export async function monitorTpSlSniper(
       active = false;
       logger.info(
         { tradeId, reason, currentValueUsdc, entryValueUsdc, pnlPct: pnlPct.toFixed(2) },
-        "Sniper TP/SL triggered — executing sell via Zora API",
+        "TP/SL triggered — executing sell via 0x AH → Li.Fi",
       );
 
       // tokenBalance already read above for the value probe — reuse it here.
