@@ -1013,10 +1013,15 @@ export async function executeBuy(params: TradeParams): Promise<void> {
   }
 }
 
+// Public Base RPC used only for the dashboard balance poll (every 30 s).
+// eth_getBalance costs 26 Alchemy CUs — ~86 k CU/month wasted on a display value.
+// mainnet.base.org is Coinbase's own free endpoint; no API key needed.
+const PUBLIC_BASE_RPC = "https://mainnet.base.org";
+
 export async function getWalletBalance(): Promise<{ address: string; balanceEth: string } | null> {
   try {
     const account = privateKeyToAccount(getWalletKey());
-    const publicClient = createPublicClient({ chain: base, transport: http(getHttpRpcUrl()) });
+    const publicClient = createPublicClient({ chain: base, transport: http(PUBLIC_BASE_RPC) });
     const balanceWei = await publicClient.getBalance({ address: account.address });
     return {
       address: account.address,
