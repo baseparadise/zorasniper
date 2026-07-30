@@ -374,7 +374,7 @@ async function fetchZoraPriceProbe(tokenAddress: string, sender: string, probeAm
  * Execute a manual buy via Zora Quote API.
  * Mirrors the sniper's executeBuy logic exactly:
  *   simulate → EIP-1559 gas estimate (capped at config.maxGasGwei)
- *   → send tx → wait → balanceOf diff (block-level) for actual tokens → DB update.
+ *   → send tx → wait → receipt log parsing for actual tokens → DB update.
  *
  * Called ONLY after a successful Zora quote. Does not handle fallback —
  * the caller (runBuy) decides Zora vs Li.Fi before calling this.
@@ -382,6 +382,32 @@ async function fetchZoraPriceProbe(tokenAddress: string, sender: string, probeAm
  * Returns the ETH-per-token entry price, or 0 if the tx reverts.
  * Throws on any error so the outer handler can record the failure.
  */
+
+/**
+ * Extract total token amount received by recipientAddress from receipt Transfer logs.
+ * See trader.ts parseReceivedFromLogs for full rationale — same logic, duplicated
+ * here to keep manual.ts self-contained.
+ */
+function parseReceivedFromLogs(
+  logs: readonly { address: string; topics: readonly string[]; data: string }[],
+  tokenAddress: string,
+  recipientAddress: string,
+): bigint {
+  const TRANSFER_TOPIC =
+    "0xddf252ad1be2c89b69c2b068fc378daa952ba7f163c4a11628f55a4df523b3ef";
+  const toTopic =
+    `0x${"0".repeat(24)}${recipientAddress.slice(2).toLowerCase()}`;
+  let total = 0n;
+  for (const log of logs) {
+    if (log.address.toLowerCase() !== tokenAddress.toLowerCase()) continue;
+    if (log.topics.length < 3) continue;
+    if (log.topics[0].toLowerCase() !== TRANSFER_TOPIC) continue;
+    if (log.topics[2].toLowerCase() !== toTopic) continue;
+    try { total += BigInt(log.data); } catch { /* skip malformed */ }
+  }
+  return total;
+}
+
 async function executeViaZora(
   tradeId: number,
   tokenAddress: Address,
@@ -484,28 +510,38 @@ async function executeViaZora(
   const receipt = await publicClient.waitForTransactionReceipt({ hash: txHash, timeout: 60_000 });
   const gasUsedEth = formatEther(receipt.gasUsed * (receipt.effectiveGasPrice ?? maxFeePerGas));
 
-  // ── Measure tokens received via balanceOf diff ─────────────────────────
-  // balBeforeBuy was snapshotted before the tx was sent (see Step 0).
-  // Read at "latest" — after waitForTransactionReceipt the tx is confirmed so
-  // latest >= receipt.blockNumber. Specifying receipt.blockNumber caused
-  // "Requested resource not found" on Alchemy nodes (block not cached yet).
+  // ── Measure tokens received ─────────────────────────────────────────────
+  // Primary: parse Transfer events from receipt (no extra RPC call, immune to
+  // Alchemy HTTP node state-freshness issues that cause balanceOf to return 0).
+  // Fallback: balanceOf diff (kept for non-standard tokens).
   let tokenAmount = "";
-  try {
-    const balAfter = await publicClient.readContract({
-      address: tokenAddress,
-      abi: ERC20_ABI,
-      functionName: "balanceOf",
-      args: [account.address],
-    });
-    const received = balAfter > balBeforeBuy ? balAfter - balBeforeBuy : 0n;
-    if (received > 0n) {
-      tokenAmount = formatUnits(received, 18);
-      logger.info({ tradeId, received: received.toString(), tokenAddress }, "Token amount measured via balanceOf diff");
-    } else {
-      logger.warn({ tradeId, balBeforeBuy: balBeforeBuy.toString(), balAfter: balAfter.toString(), tokenAddress }, "balanceOf diff: no increase detected");
+  let received = 0n;
+
+  // Primary path — receipt log parsing
+  received = parseReceivedFromLogs(receipt.logs, tokenAddress, account.address);
+  if (received > 0n) {
+    tokenAmount = formatUnits(received, 18);
+    logger.info({ tradeId, received: received.toString(), tokenAddress }, "Token amount from receipt Transfer event");
+  } else {
+    // Fallback — balanceOf diff
+    logger.warn({ tradeId, tokenAddress }, "No Transfer event in receipt — falling back to balanceOf diff");
+    try {
+      const balAfter = await publicClient.readContract({
+        address: tokenAddress,
+        abi: ERC20_ABI,
+        functionName: "balanceOf",
+        args: [account.address],
+      });
+      received = balAfter > balBeforeBuy ? balAfter - balBeforeBuy : 0n;
+      if (received > 0n) {
+        tokenAmount = formatUnits(received, 18);
+        logger.info({ tradeId, received: received.toString(), tokenAddress }, "Token amount measured via balanceOf diff (fallback)");
+      } else {
+        logger.warn({ tradeId, balBeforeBuy: balBeforeBuy.toString(), balAfter: balAfter.toString(), tokenAddress }, "balanceOf diff fallback: no increase detected");
+      }
+    } catch (err) {
+      logger.warn({ tradeId, tokenAddress, err: err instanceof Error ? err.message : String(err) }, "balanceOf diff fallback failed — token amount left blank");
     }
-  } catch (err) {
-    logger.warn({ tradeId, tokenAddress, err: err instanceof Error ? err.message : String(err) }, "balanceOf diff failed — token amount left blank");
   }
 
   const tokensNum = tokenAmount ? parseFloat(tokenAmount) : 0;

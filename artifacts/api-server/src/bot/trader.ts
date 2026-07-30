@@ -763,6 +763,52 @@ async function executeLiFiSell(params: {
   logger.info({ tradeId, ethRecovered, reason }, "Sniper sell confirmed via Li.Fi");
 }
 
+// ── parseReceivedFromLogs ───────────────────────────────────────────────────
+/**
+ * Extract the total token amount received by `recipientAddress` from the
+ * ERC-20 Transfer events in a transaction receipt.
+ *
+ * This is the PREFERRED way to measure tokens received after a buy, because:
+ * - The receipt is already in memory — zero extra RPC calls.
+ * - No dependency on node state freshness: some RPC providers (Alchemy, public
+ *   Base RPC) serve stale `eth_call` / `eth_getStorageAt` state for a brief
+ *   window after confirming a block due to HTTP load-balancing across nodes
+ *   that haven't all indexed the new block yet. A balanceOf read right after
+ *   waitForTransactionReceipt can return the pre-tx balance (0) even though
+ *   the tx was included, which is exactly the "balanceOf diff: no increase
+ *   detected / balBeforeBuy: 0 balAfter: 0" symptom.
+ *
+ * Falls back to zero (caller should then try balanceOf diff) if no matching
+ * Transfer event is found (e.g., non-standard token or routing through a
+ * wrapper that doesn't emit standard ERC-20 transfers directly).
+ */
+function parseReceivedFromLogs(
+  logs: readonly { address: string; topics: readonly string[]; data: string }[],
+  tokenAddress: string,
+  recipientAddress: string,
+): bigint {
+  // ERC-20 Transfer(address indexed from, address indexed to, uint256 value)
+  const TRANSFER_TOPIC =
+    "0xddf252ad1be2c89b69c2b068fc378daa952ba7f163c4a11628f55a4df523b3ef";
+  // ABI-encoding of an address pads to 32 bytes: 12 zero-bytes + 20-byte address
+  const toTopic =
+    `0x${"0".repeat(24)}${recipientAddress.slice(2).toLowerCase()}`;
+
+  let total = 0n;
+  for (const log of logs) {
+    if (log.address.toLowerCase() !== tokenAddress.toLowerCase()) continue;
+    if (log.topics.length < 3) continue;
+    if (log.topics[0].toLowerCase() !== TRANSFER_TOPIC) continue;
+    if (log.topics[2].toLowerCase() !== toTopic) continue;
+    try {
+      total += BigInt(log.data);
+    } catch {
+      // malformed data — skip this log
+    }
+  }
+  return total;
+}
+
 // ── executeBuy ─────────────────────────────────────────────────────────────
 
 export async function executeBuy(params: TradeParams): Promise<void> {
@@ -897,29 +943,39 @@ export async function executeBuy(params: TradeParams): Promise<void> {
       receipt.gasUsed * (receipt.effectiveGasPrice ?? maxFeePerGas),
     );
 
-    // ── Step 6: Measure tokens received via balanceOf diff ────────────────────
-    // balBeforeBuy was snapshotted before the tx was sent (see Step 0).
-    // Read at "latest" — after waitForTransactionReceipt the tx is confirmed so
-    // latest >= receipt.blockNumber. Specifying receipt.blockNumber caused
-    // "Requested resource not found" on Alchemy nodes (block not cached yet).
+    // ── Step 6: Measure tokens received ──────────────────────────────────────
+    // Primary: parse Transfer events from the receipt (already in memory —
+    // no extra RPC call, immune to node state-freshness issues).
+    // Fallback: balanceOf diff (kept for non-standard tokens, but unreliable
+    // on Alchemy HTTP — some nodes return stale state right after confirmation).
     let tokenAmount = "";
     let receivedWei = 0n;
-    try {
-      const balAfter = await publicClient.readContract({
-        address: tokenAddress,
-        abi: ERC20_ABI,
-        functionName: "balanceOf",
-        args: [account.address],
-      });
-      receivedWei = balAfter > balBeforeBuy ? balAfter - balBeforeBuy : 0n;
-      if (receivedWei > 0n) {
-        tokenAmount = formatUnits(receivedWei, 18);
-        logger.info({ received: receivedWei.toString(), tokenAddress }, "Token amount measured via balanceOf diff");
-      } else {
-        logger.warn({ balBeforeBuy: balBeforeBuy.toString(), balAfter: balAfter.toString(), tokenAddress }, "balanceOf diff: no increase detected");
+
+    // Primary path — receipt log parsing
+    receivedWei = parseReceivedFromLogs(receipt.logs, tokenAddress, account.address);
+    if (receivedWei > 0n) {
+      tokenAmount = formatUnits(receivedWei, 18);
+      logger.info({ received: receivedWei.toString(), tokenAddress }, "Token amount from receipt Transfer event");
+    } else {
+      // Fallback — balanceOf diff
+      logger.warn({ tokenAddress }, "No Transfer event found in receipt — falling back to balanceOf diff");
+      try {
+        const balAfter = await publicClient.readContract({
+          address: tokenAddress,
+          abi: ERC20_ABI,
+          functionName: "balanceOf",
+          args: [account.address],
+        });
+        receivedWei = balAfter > balBeforeBuy ? balAfter - balBeforeBuy : 0n;
+        if (receivedWei > 0n) {
+          tokenAmount = formatUnits(receivedWei, 18);
+          logger.info({ received: receivedWei.toString(), tokenAddress }, "Token amount measured via balanceOf diff (fallback)");
+        } else {
+          logger.warn({ balBeforeBuy: balBeforeBuy.toString(), balAfter: balAfter.toString(), tokenAddress }, "balanceOf diff fallback: no increase detected");
+        }
+      } catch (err) {
+        logger.warn({ tokenAddress, err: err instanceof Error ? err.message : String(err) }, "balanceOf diff fallback failed — token amount left blank");
       }
-    } catch (err) {
-      logger.warn({ tokenAddress, err: err instanceof Error ? err.message : String(err) }, "balanceOf diff failed — token amount left blank");
     }
 
     // ── Step 7: Fetch entry USDC value via price × balance ───────────────────
