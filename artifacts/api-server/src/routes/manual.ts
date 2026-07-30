@@ -1207,8 +1207,24 @@ router.get("/positions", async (_req, res): Promise<void> => {
         /* keep 0n */
       }
 
-      // Balance is zero — position was closed externally (sold from wallet).
+      // Balance is zero — position was likely closed externally (sold from wallet).
+      // BUT: Alchemy's HTTP endpoint is load-balanced and can serve stale state
+      // for up to ~30s after a new block is confirmed. A freshly-bought token's
+      // balance can read as 0 even though the buy tx succeeded, causing a
+      // false-positive auto-close that deletes the position immediately after buy.
+      // Grace period: skip auto-close for the first 2 minutes after the trade was
+      // recorded. After that window, a 0 balance reliably means external close.
       if (rawBal === 0n) {
+        const tradeAgeMs = Date.now() - new Date(trade.timestamp).getTime();
+        const GRACE_MS = 2 * 60 * 1000; // 2 minutes
+        if (tradeAgeMs < GRACE_MS) {
+          logger.info(
+            { tradeId: trade.id, tradeAgeMs, tokenAddress: trade.tokenAddress },
+            "Position balance is 0 but trade is too new — skipping auto-close (RPC staleness grace period)",
+          );
+          // Return the position without live value — it will populate on the next poll
+          return { trade, currentBalanceTokens: "0", entryPriceEth: trade.entryPriceEth ?? "0", currentValueUsdc: "0", pnlPercent: 0, priceUsd: null, mcUsd: null };
+        }
         await db
           .update(tradesTable)
           .set({ status: "sold", failReason: "closed externally — balance is 0" })
